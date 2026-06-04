@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Lists available FrankenPHP versions via GitHub API (all stable releases).
+AUTH_HEADER=""
+TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+[[ -n "$TOKEN" ]] && AUTH_HEADER="-H Authorization:\ Bearer\ ${TOKEN}"
+
+curl -sf ${AUTH_HEADER} \
+    "https://api.github.com/repos/php/frankenphp/releases?per_page=100" \
+    | python3 -c "
+import json, sys, re
+releases = json.load(sys.stdin)
+for r in releases:
+    tag = r.get('tag_name', '').lstrip('v')
+    if not r.get('prerelease') and not r.get('draft') and re.match(r'^\d+\.\d+\.\d+$', tag):
+        print(tag)
+" 2>/dev/null \
+|| echo "1.12.4"

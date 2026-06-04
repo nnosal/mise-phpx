@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec mise x "frankenphp@${PHPX_FRANKENPHP_VERSION:-latest}" -q --raw -- frankenphp php-cli "$@"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Built-in aliases marking PHP minor version milestones bundled in FrankenPHP.
+# Update when FrankenPHP ships a new PHP minor (run: phpx --version to confirm).
+#
+# Confirmed mappings:
+#   PHP 8.3 series: FrankenPHP 1.0.x – 1.2.x  (1.0.3=PHP8.3.1, 1.1.0=PHP8.3.4)
+#   PHP 8.4 series: FrankenPHP 1.3.x+          (1.3.3=PHP8.4.2)
+echo -e "php8.3\t1.2.5"
+echo -e "php8.4\tlatest"

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Create a symlink so Mise can find the phpx wrapper in the install path
+mkdir -p "${MISE_INSTALL_PATH}/bin"
+ln -sf "${MISE_PLUGIN_PATH}/bin/phpx" "${MISE_INSTALL_PATH}/bin/phpx"

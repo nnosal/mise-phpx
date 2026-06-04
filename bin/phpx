@@ -1,0 +1,444 @@
+#!/usr/bin/env bash
+#MISE description="FrankenPHP wrapper with enhanced features"
+
+set -eo pipefail
+
+FP_VERSION="${PHPX_FRANKENPHP_VERSION:-latest}"
+FP_BACKEND="github:php/frankenphp"
+case "$(uname -s)" in
+    Darwin) FP_BIN="frankenphp-mac" ;;
+    *)      FP_BIN="frankenphp-linux" ;;
+esac
+
+# Plugin-managed extension directory.
+# Each PHP API version gets its own .ini in extensions.d/ so only matching
+# extensions are loaded — no startup warnings when switching PHP versions.
+PHPX_DATA="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx"
+# One .ini file per PHP API version, stored in extensions.d/.
+# PHP_INI_SCAN_DIR scans extensions.d/ — only the symlink "active.ini" is active,
+# pointing to the ini for the current PHP API version.
+PHPX_EXT_D="${PHPX_DATA}/extensions.d"
+mkdir -p "$PHPX_EXT_D"
+# Determine current PHP API version from running FrankenPHP
+_cur_api_php=$(mktemp /tmp/phpx-api-XXXXXX.php)
+printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_cur_api_php"
+_cur_ext_dir=$(PHP_INI_SCAN_DIR="" mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- \
+    "${FP_BIN}" php-cli "$_cur_api_php" 2>/dev/null || echo "")
+rm -f "$_cur_api_php"
+_cur_api=$(basename "$_cur_ext_dir")  # e.g. no-debug-zts-20240924
+PHPX_INI="${PHPX_EXT_D}/${_cur_api:-default}.ini"
+# Keep a symlink active.ini → current PHP version's ini so PHP only loads one file
+ln -sf "${_cur_api:-default}.ini" "${PHPX_EXT_D}/active.ini" 2>/dev/null || true
+# PHP_INI_SCAN_DIR: use a dedicated subdir containing ONLY the active symlink
+PHPX_SCAN_D="${PHPX_DATA}/ini-scan"
+mkdir -p "$PHPX_SCAN_D"
+ln -sf "${PHPX_INI}" "${PHPX_SCAN_D}/extensions.ini" 2>/dev/null || true
+export PHP_INI_SCAN_DIR="${PHPX_SCAN_D}"
+
+# Find the -- delimiter
+DELIMITER_INDEX=-1
+for ((i = 1; i <= ${#}; i++)); do
+    if [[ "${!i}" == "--" ]]; then
+        DELIMITER_INDEX=$i
+        break
+    fi
+done
+
+# Split args by delimiter
+if [[ $DELIMITER_INDEX -ge 1 ]]; then
+    FIRST_ARGS=("${@:1:$((DELIMITER_INDEX-1))}")
+    COMMAND_ARGS=("${@:$((DELIMITER_INDEX+1))}")
+else
+    FIRST_ARGS=("$@")
+    COMMAND_ARGS=()
+fi
+
+# Parse first args for frankenphp version
+ARGS=()
+i=0
+while [[ $i -lt ${#FIRST_ARGS[@]} ]]; do
+    arg="${FIRST_ARGS[$i]}"
+
+    if [[ "$arg" =~ ^frankenphp@(.+)$ ]]; then
+        FP_VERSION="${BASH_REMATCH[1]}"
+    elif [[ "$arg" =~ ^composer:([^@]+)(@.+)?$ ]]; then
+        # Delegate to composer tool - extract binary name
+        PACKAGE="${BASH_REMATCH[1]}"
+        VERSION="${BASH_REMATCH[2]}"
+        BINARY=$(echo "$PACKAGE" | sed 's|.*/||')
+        exec mise x "composer:${PACKAGE}${VERSION}" -- "$BINARY" "${COMMAND_ARGS[@]}"
+    elif [[ "$arg" =~ ^phive:([^@]+)(@.+)?$ ]]; then
+        # Delegate to phive tool - extract binary name
+        TOOL="${BASH_REMATCH[1]}"
+        VERSION="${BASH_REMATCH[2]}"
+        BINARY=$(echo "$TOOL" | sed 's|.*/||')
+        exec mise x "phive:${TOOL}${VERSION}" -- "$BINARY" "${COMMAND_ARGS[@]}"
+    else
+        ARGS+=("$arg")
+    fi
+    ((i++))
+done
+
+# Handle special commands
+case "${ARGS[0]:-}" in
+    -a|--interactive|console|tinker)
+        # Interactive shell with psysh
+        exec psysh
+        ;;
+    composer)
+        COMPOSER_PHAR="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/composer.phar"
+        if [[ ! -f "$COMPOSER_PHAR" ]]; then
+            mkdir -p "$(dirname "$COMPOSER_PHAR")"
+            curl -sL https://getcomposer.org/composer.phar -o "$COMPOSER_PHAR"
+        fi
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-cli "$COMPOSER_PHAR" "${ARGS[@]:1}"
+        ;;
+    -x|--ext)
+        if [[ ${#ARGS[@]} -lt 2 ]]; then
+            echo "Usage: phpx -x <command> [args...]"
+            echo "Commands: install, uninstall, list, show"
+            exit 1
+        fi
+        case "${ARGS[1]}" in
+            install)
+                if [[ ${#ARGS[@]} -lt 3 ]]; then
+                    echo "Usage: phpx -x install <extension>"
+                    exit 1
+                fi
+                # Find pie.phar from the installed pie wrapper in PATH.
+                # Bypass mise x phpx:phive:pie to preserve PATH through the call chain.
+                _PIE_DIR=$(dirname "$(which pie 2>/dev/null)" 2>/dev/null)
+                _PIE_PHAR="${_PIE_DIR}/pie.phar"
+                if [[ ! -f "$_PIE_PHAR" ]]; then
+                    echo "phpx: pie not found. Add \"phpx:phive:pie\" to your mise.toml." >&2
+                    exit 1
+                fi
+                # Create a php wrapper — PIE uses PhpExecutableFinder which searches PATH.
+                # php-cli -r support was added in FrankenPHP ~1.11.x; older versions treat -r as a file.
+                # Use latest for anything below 1.11.0 to guarantee -r works.
+                _PIE_FP_VERSION="${FP_VERSION}"
+                if [[ "$(printf '%s\n' "1.11.0" "${FP_VERSION}" | sort -V | head -1)" == "${FP_VERSION}" ]]; then
+                    _PIE_FP_VERSION="latest"
+                fi
+                _PHP_DIR=$(mktemp -d /tmp/phpx-php-XXXXXX)
+                # FrankenPHP php-cli only supports -r for inline code; map common PHP
+                # flags that PIE calls (-i for phpinfo, -m for modules, --ini, etc.)
+                _FP_CMD="mise x '${FP_BACKEND}@${_PIE_FP_VERSION}' -q --raw -- ${FP_BIN} php-cli"
+                # Detect extension_dir dynamically from the active FrankenPHP version.
+                _EXT_BASE="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/extensions"
+                _xtmp=$(mktemp /tmp/phpx-xt-XXXXXX.php); printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_xtmp"
+                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- "${FP_BIN}" php-cli "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
+                _EXT_API=$(basename "${_FP_EXT_DIR}")  # e.g. no-debug-zts-20240924
+                _LOCAL_EXT_DIR="${_EXT_BASE}/${_EXT_API}"
+                mkdir -p "$_LOCAL_EXT_DIR"
+                {
+                    printf '#!/usr/bin/env bash\n'
+                    printf '_FP=%s\n' "'${_FP_CMD}'"
+                    printf 'case "$1" in\n'
+                    # PIE parses phpinfo() text output (regex on plain-text format).
+                    # FrankenPHP outputs HTML even in CLI mode, so we generate the text format manually.
+                    # Use a writable user-local extension_dir since /lib/php/extensions is read-only on macOS.
+                    _PHPINFO_CODE='$d="'"${_LOCAL_EXT_DIR}"'";preg_match("/(\d+)$/",$d,$m);$api=$m[1]??"";$ts=PHP_ZTS?"TS":"NTS";echo"phpinfo()\nPHP Version => ".PHP_VERSION."\nDebug Build => no\nPHP API => $api\nPHP Extension Build => API$api,$ts\nextension_dir => $d => $d\nArchitecture => ".(PHP_INT_SIZE==8?"x64":"x86")."\nLoaded Configuration File => ".(php_ini_loaded_file()?:"(none)")."\nScan this dir for additional .ini files => (none)\nBuild Provider => FrankenPHP\n";'
+                    printf '  -i)        $_FP -r %s ;;\n'        "'${_PHPINFO_CODE}'"
+                    printf '  -m)        $_FP -r %s ;;\n'        "'echo \"[PHP Modules]\";foreach(get_loaded_extensions() as \$e){echo \$e.PHP_EOL;}'"
+                    printf '  --ini)     $_FP -r %s ;;\n'        "'echo php_ini_loaded_file();'"
+                    printf '  --version) $_FP -r %s ;;\n'        "'echo \"PHP \".PHP_VERSION.\" (cli)\";'"
+                    printf '  *)         $_FP "$@" ;;\n'
+                    printf 'esac\n'
+                } > "$_PHP_DIR/php"
+                chmod +x "$_PHP_DIR/php"
+                # FrankenPHP is ZTS — find or auto-provision a matching ZTS phpize.
+                # Detect PHP version from the RUNTIME FP_VERSION (not the upgraded _PIE_FP_VERSION),
+                # using a temp PHP file so it works with old FrankenPHP versions that lack -r support.
+                _ver_php=$(mktemp /tmp/phpx-ver-XXXXXX.php)
+                printf '<?php echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;\n' > "$_ver_php"
+                _FP_PHP_VER=$(PHP_INI_SCAN_DIR="" mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- "${FP_BIN}" php-cli "$_ver_php" 2>/dev/null || echo "")
+                rm -f "$_ver_php"
+                _PHPIZE=""
+                _PHPCONFIG=""
+                _ZTS_CACHE="${PHPX_DATA}/phpize-zts/${_FP_PHP_VER}"
+
+                # 1. Plugin-managed cache (downloaded bottle, no brew install needed)
+                if [[ -x "${_ZTS_CACHE}/bin/phpize" ]]; then
+                    _PHPIZE="${_ZTS_CACHE}/bin/phpize"
+                    _PHPCONFIG="${_ZTS_CACHE}/bin/php-config"
+                    echo "phpx: using cached ZTS phpize for PHP ${_FP_PHP_VER}"
+
+                # 2. Already brew-installed — check version matches FrankenPHP's PHP
+                elif [[ -x "/opt/homebrew/opt/php@${_FP_PHP_VER}-zts/bin/phpize" ]]; then
+                    _PHPIZE="/opt/homebrew/opt/php@${_FP_PHP_VER}-zts/bin/phpize"
+                    _PHPCONFIG="/opt/homebrew/opt/php@${_FP_PHP_VER}-zts/bin/php-config"
+                    echo "phpx: using ZTS phpize from php@${_FP_PHP_VER}-zts"
+                elif [[ -x "/opt/homebrew/opt/php-zts/bin/phpize" ]]; then
+                    # php-zts is the "latest" alias — only use if it matches _FP_PHP_VER
+                    _phpzts_ver=$(/opt/homebrew/opt/php-zts/bin/php-config --version 2>/dev/null | cut -d. -f1,2)
+                    if [[ "$_phpzts_ver" == "$_FP_PHP_VER" ]]; then
+                        _PHPIZE="/opt/homebrew/opt/php-zts/bin/phpize"
+                        _PHPCONFIG="/opt/homebrew/opt/php-zts/bin/php-config"
+                        echo "phpx: using ZTS phpize from php-zts (PHP ${_phpzts_ver})"
+                    fi
+                fi
+
+                # 3. Auto-provision: download bottle + extract (no brew install, no deps)
+                if [[ -z "$_PHPIZE" ]] && command -v brew &>/dev/null; then
+                    echo "phpx: provisioning ZTS phpize for PHP ${_FP_PHP_VER} (one-time download)..." >&2
+                    _zts_formula="shivammathur/php/php@${_FP_PHP_VER}-zts"
+                    # Ensure tap
+                    brew tap shivammathur/php &>/dev/null || true
+                    # Detect macOS bottle tag
+                    _mac_ver=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1,2)
+                    _mac_name=$(sw_vers -productName 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+                    _arch=$(uname -m | sed 's/arm64/arm64_/;s/x86_64//')
+                    # Try common tags
+                    _fetched=""
+                    for _tag in "${_arch}sequoia" "${_arch}tahoe" "${_arch}sonoma" "sequoia" "sonoma"; do
+                        brew fetch --quiet --bottle-tag="${_tag}" "$_zts_formula" &>/dev/null 2>&1 || true
+                        # Match versioned bottle — filename must contain the PHP version (e.g. 8.4)
+                        _fetched=$(find "$(brew --cache)/downloads" \
+                            -name "*php*zts*bottle*.tar.gz" ! -name "*.json" 2>/dev/null \
+                            | grep "${_FP_PHP_VER//./[.]}" | sort -r | head -1)
+                        [[ -n "$_fetched" ]] && break
+                    done
+
+                    if [[ -n "$_fetched" && -f "$_fetched" ]]; then
+                        mkdir -p "$_ZTS_CACHE"
+                        # Extract all files, strip the formula/version prefix (2 levels)
+                        tar -xzf "$_fetched" -C "$_ZTS_CACHE" --strip-components=2 2>/dev/null
+                        if [[ -f "${_ZTS_CACHE}/bin/phpize" ]]; then
+                            # Determine the original Cellar path from the bottle
+                            # Format: @@HOMEBREW_CELLAR@@/php-zts/{full_version}  OR  php@8.4-zts/{full_version}
+                            _orig_cellar=$(grep "@@HOMEBREW_CELLAR@@" "${_ZTS_CACHE}/bin/phpize" 2>/dev/null | grep -o "@@HOMEBREW_CELLAR@@/[^ '\"]*" | head -1 | sed 's|/bin/.*||;s|/include/.*||')
+                            _orig_prefix=$(echo "$_orig_cellar" | sed 's|@@HOMEBREW_CELLAR@@|/opt/homebrew/Cellar|')
+                            # Relocate: replace @@HOMEBREW_CELLAR@@/pkg/ver and @@HOMEBREW_PREFIX@@ in text files
+                            find "$_ZTS_CACHE" -type f | while IFS= read -r _f; do
+                                file "$_f" 2>/dev/null | grep -q text || continue
+                                [[ -n "$_orig_cellar" ]] && sed -i '' "s|${_orig_cellar}|${_ZTS_CACHE}|g" "$_f" 2>/dev/null || true
+                                sed -i '' 's|@@HOMEBREW_PREFIX@@|/opt/homebrew|g' "$_f" 2>/dev/null || true
+                            done
+                            # Ensure prefix= line also points correctly
+                            sed -i '' "s|^prefix=.*|prefix='${_ZTS_CACHE}'|" "${_ZTS_CACHE}/bin/phpize" 2>/dev/null || true
+                            sed -i '' "s|^prefix=.*|prefix='${_ZTS_CACHE}'|" "${_ZTS_CACHE}/bin/php-config" 2>/dev/null || true
+                            chmod +x "${_ZTS_CACHE}/bin/phpize" "${_ZTS_CACHE}/bin/php-config"
+                            _PHPIZE="${_ZTS_CACHE}/bin/phpize"
+                            _PHPCONFIG="${_ZTS_CACHE}/bin/php-config"
+                            echo "phpx: ZTS phpize for PHP ${_FP_PHP_VER} ready in ${_ZTS_CACHE}" >&2
+                        fi
+                    fi
+                fi
+
+                # 4. Last resort: system NTS phpize with warning
+                if [[ -z "$_PHPIZE" ]]; then
+                    echo "phpx: ⚠️  no ZTS phpize for PHP ${_FP_PHP_VER} — extension will compile but not load (NTS/ZTS mismatch)" >&2
+                    _PHPIZE=$(which phpize 2>/dev/null)
+                    _PHPCONFIG=$(which php-config 2>/dev/null)
+                fi
+                if [[ -n "$_PHPCONFIG" ]]; then
+                    {
+                        printf '#!/usr/bin/env bash\n'
+                        printf '_REAL=%s\n' "'${_PHPCONFIG}'"
+                        printf 'case "$1" in\n'
+                        printf '  --php-binary)     echo %s ;;\n'    "'${_PHP_DIR}/php'"
+                        printf '  --extension-dir)  echo %s ;;\n'    "'${_LOCAL_EXT_DIR}'"
+                        printf '  *)                exec $_REAL "$@" ;;\n'
+                        printf 'esac\n'
+                    } > "$_PHP_DIR/php-config"
+                    chmod +x "$_PHP_DIR/php-config"
+                fi
+                _PHPIZE_OPT=""
+                [[ -n "$_PHPIZE" ]] && _PHPIZE_OPT="--with-phpize-path ${_PHPIZE}"
+                _PHPCONFIG_OPT=""
+                [[ -f "$_PHP_DIR/php-config" ]] && _PHPCONFIG_OPT="--with-php-config ${_PHP_DIR}/php-config"
+
+                # Build COMPOSER_AUTH from GITHUB_TOKEN to avoid interactive token prompts
+                _COMPOSER_AUTH=""
+                [[ -n "${GITHUB_TOKEN:-}" ]] && \
+                    _COMPOSER_AUTH='{"github-oauth":{"github.com":"'"${GITHUB_TOKEN}"'"}}'
+
+                # Unset PHP_INI_SCAN_DIR so existing extensions don't interfere with PIE's PHP detection
+                PHP_BINARY="$_PHP_DIR/php" PHP_PATH="$_PHP_DIR/php" PATH="$_PHP_DIR:$PATH" \
+                PHP_INI_SCAN_DIR="" COMPOSER_AUTH="${_COMPOSER_AUTH}" \
+                mise x "${FP_BACKEND}@${_PIE_FP_VERSION}" -q --raw -- \
+                    "${FP_BIN}" php-cli "$_PIE_PHAR" install \
+                    --auto-install-build-tools ${_PHPIZE_OPT} ${_PHPCONFIG_OPT} "${ARGS[@]:2}"
+                _rc=$?
+
+                if [[ $_rc -eq 0 ]]; then
+                    # Sync all .so in _LOCAL_EXT_DIR into extensions.ini
+                    mkdir -p "$PHPX_DATA"
+                    # Rewrite extensions.ini: header + extension_dir + all .so entries
+                    {
+                        printf '; Auto-managed by phpx -x install. Do not edit manually.\n'
+                        # Use full .so path to avoid extension_dir conflicts across PHP versions
+                        for _so in "$_LOCAL_EXT_DIR"/*.so; do
+                            [[ -f "$_so" ]] || continue
+                            printf 'extension = %s\n' "$_so"
+                        done
+                    } > "$PHPX_INI"
+                    echo "phpx: extensions registered in ${PHPX_INI}:"
+                    grep "^extension = " "$PHPX_INI" | sed 's/^/  /'
+                fi
+
+                rm -rf "$_PHP_DIR"
+                exit $_rc
+                ;;
+            uninstall)
+                if [[ ${#ARGS[@]} -lt 3 ]]; then
+                    echo "Usage: phpx -x uninstall <package-or-extension>"
+                    exit 1
+                fi
+                _PIE_FP_VERSION="${FP_VERSION}"
+                if [[ "$(printf '%s\n' "1.2.0" "${FP_VERSION}" | sort -V | head -1)" == "${FP_VERSION}" ]]; then
+                    _PIE_FP_VERSION="latest"
+                fi
+                _EXT_BASE="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/extensions"
+                _xtmp=$(mktemp /tmp/phpx-xt-XXXXXX.php); printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_xtmp"
+                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" mise x "${FP_BACKEND}@${_PIE_FP_VERSION}" -q --raw -- "${FP_BIN}" php-cli "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
+                _LOCAL_EXT_DIR="${_EXT_BASE}/$(basename "${_FP_EXT_DIR}")"
+
+                # Derive extension name: asgrim/example-pie-extension → example_pie_extension
+                _pkg="${ARGS[2]}"
+                _ext_guess=$(echo "${_pkg##*/}" | tr '-' '_')
+                # Find matching .so (exact or suffix match)
+                _found_so=""
+                for _so in "$_LOCAL_EXT_DIR"/*.so; do
+                    [[ -f "$_so" ]] || continue
+                    _name=$(basename "$_so" .so)
+                    if [[ "$_name" == "$_ext_guess" || "$_name" == *"$_ext_guess" ]]; then
+                        _found_so="$_so"
+                        break
+                    fi
+                done
+
+                if [[ -z "$_found_so" ]]; then
+                    echo "phpx: no installed extension found matching '${_pkg}'" >&2
+                    echo "      installed: $(ls "$_LOCAL_EXT_DIR"/*.so 2>/dev/null | xargs -I{} basename {} .so | tr '\n' ' ')" >&2
+                    exit 1
+                fi
+
+                rm -f "$_found_so"
+                echo "phpx: removed $(basename "$_found_so")"
+
+                # Rebuild extensions.ini
+                mkdir -p "$PHPX_DATA"
+                {
+                    printf '; Auto-managed by phpx -x install. Do not edit manually.\n'
+                    printf 'extension_dir = %s\n' "$_LOCAL_EXT_DIR"
+                    for _so in "$_LOCAL_EXT_DIR"/*.so; do
+                        [[ -f "$_so" ]] || continue
+                        printf 'extension = %s\n' "$(basename "$_so" .so)"
+                    done
+                } > "$PHPX_INI"
+                _rem=$(grep -c "^extension = " "$PHPX_INI" 2>/dev/null; true)
+                echo "phpx: extensions.ini updated (${_rem:-0} extensions remaining)"
+                ;;
+            list)
+                echo "Installed extensions (${PHPX_INI:-~/.local/share/mise/phpx/extensions.ini}):"
+                if [[ ! -f "$PHPX_INI" ]]; then
+                    echo "  (none)"
+                else
+                    # Extensions may be full paths; extract module name (basename without .so)
+                    _exts=$(grep "^extension = " "$PHPX_INI" 2>/dev/null | awk '{print $3}' | xargs -I{} basename {} .so)
+                    if [[ -z "$_exts" ]]; then
+                        echo "  (none)"
+                    else
+                        # Check each extension's load status via temp file (works with all FrankenPHP versions)
+                        while IFS= read -r _ext; do
+                            _chk=$(mktemp /tmp/phpx-chk-XXXXXX.php)
+                            printf "<?php echo extension_loaded('%s') ? 'loaded' : 'not loaded';\n" "$_ext" > "$_chk"
+                            _loaded=$(phpx "$_chk" 2>/dev/null || echo "error")
+                            rm -f "$_chk"
+                            printf '  %-40s %s\n' "$_ext" "$_loaded"
+                        done <<< "$_exts"
+                    fi
+                fi
+                ;;
+            show|*)
+                exec mise x "phpx:phive:pie" -- pie "${ARGS[@]:1}"
+                ;;
+        esac
+        ;;
+    --composer)
+        COMPOSER_PHAR="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/composer.phar"
+        if [[ ! -f "$COMPOSER_PHAR" ]]; then
+            mkdir -p "$(dirname "$COMPOSER_PHAR")"
+            curl -sL https://getcomposer.org/composer.phar -o "$COMPOSER_PHAR"
+        fi
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-cli "$COMPOSER_PHAR" "${ARGS[@]:1}"
+        ;;
+    --version|-v)
+        raw=$(mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} --version 2>&1 | head -1) || {
+            echo "phpx: FrankenPHP version '${FP_VERSION}' not found or not installed." >&2
+            echo "Run: mise ls-remote phpx:phpx   to list available versions and aliases." >&2
+            exit 1
+        }
+        php_ver=$(echo "$raw" | sed 's/.*PHP \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/' || echo "unknown")
+        fp_ver=$(echo "$raw"  | sed 's/FrankenPHP \([^ ]*\) .*/\1/' || echo "unknown")
+        caddy_ver=$(echo "$raw" | sed 's/.*Caddy \([^ ]*\) .*/\1/' || echo "unknown")
+        zend_ver=$(echo "$php_ver" | sed 's/[0-9]*\.\([0-9]*\.[0-9]*\)/4.\1/')
+
+        echo "PHP ${php_ver} (cli) (built: FrankenPHP ${fp_ver} Caddy ${caddy_ver}) (NTS)"
+        echo "Copyright (c) The PHP Group"
+        echo "Built by FrankenPHP"
+        echo "Zend Engine v${zend_ver}, Copyright (c) Zend Technologies"
+        echo "    with Zend OPcache v${php_ver}, Copyright (c), by Zend Technologies"
+        exit 0
+        ;;
+    -S)
+        if [[ ${#ARGS[@]} -lt 2 ]]; then
+            echo "Usage: php -S <addr:port>"
+            exit 1
+        fi
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-server --listen "${ARGS[1]}" "${ARGS[@]:2}"
+        ;;
+    -r)
+        if [[ ${#ARGS[@]} -lt 2 ]]; then
+            echo "Usage: php -r '<code>'"
+            exit 1
+        fi
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-cli -r "${ARGS[1]}" "${ARGS[@]:2}"
+        ;;
+    "")
+        exec "$0" --help
+        ;;
+    -f)
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-cli "${ARGS[@]}"
+        ;;
+    --help|-h)
+        cat <<'EOF'
+Usage: phpx [options] [-f] <file> [--] [args...]
+
+Options:
+  -a, --interactive      Start interactive shell (psysh)
+  console, tinker        Alias for interactive shell
+  -S <addr:port>         Run built-in web server
+  -r <code>             Execute PHP code
+  -f <file>             Parse and execute file
+  -x, --ext <cmd> [args] Extension manager (install, list, show)
+  composer [args]        Use composer directly
+  --composer [args]      Use composer tool
+  --version, -v         Display version info
+  -h, --help            Display this help
+
+Advanced:
+  phpx frankenphp@1.0.0 -r '<code>'      Use specific FrankenPHP version
+  phpx composer:cpx@1.0.2 -- [args]      Use specific composer package
+  phpx phive:pie@1.4.4 -- [args]         Use specific PHAR tool
+
+Examples:
+  phpx -a                                 Interactive shell
+  phpx console                            Start psysh console
+  phpx composer install                   Run composer
+  phpx -S localhost:8000                  Start web server
+  phpx script.php                         Execute script
+  phpx -r 'echo "Hello";'                 Run code
+  phpx -x install php/ext-redis           Install extension
+  phpx frankenphp@1.0.0 -v                Check version with specific frankenphp
+  phpx composer:cpx@1.0.2 -- --version    Use cpx version 1.0.2
+
+EOF
+        exit 0
+        ;;
+    *)
+        exec mise x "${FP_BACKEND}@${FP_VERSION}" -q --raw -- ${FP_BIN} php-cli "${ARGS[@]}"
+        ;;
+esac
