@@ -22,9 +22,10 @@ local PHIVE = {
     ["phive"]    = "phar-io/phive",
     ["composer"] = "composer/composer",
     -- WordPress php-toolkit with blueprints.phar as default
-    ["php-toolkit"] = {
+    ["wp-blueprint"] = {
         repo = "WordPress/php-toolkit",
-        asset_pattern = "blueprints.phar"
+        asset_pattern = "blueprints.phar",
+        rename_exe = "wp-blueprint"
     },
 }
 

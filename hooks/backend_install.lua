@@ -84,7 +84,17 @@ function PLUGIN:BackendInstall(ctx)
         local cmd  = require("cmd")
         local json = require("json")
         local a    = require("aliases")
-        local repo = a.resolve_phive(tool)
+        local resolved = a.resolve_phive(tool)
+        
+        -- resolved can be a string (vendor/repo) or table (config with repo, options)
+        local repo, config
+        if type(resolved) == "table" then
+            repo = resolved.repo
+            config = resolved
+        else
+            repo = resolved
+            config = {}
+        end
 
         if not repo:match("/") then
             error("PHAR tool must be vendor/repo format or a known alias")
@@ -105,10 +115,10 @@ function PLUGIN:BackendInstall(ctx)
         if api_ok and api_out and api_out ~= "" then
             local data = json.decode(api_out) or {}
             if data.assets then
-                -- Get options from tool config (matching, asset_pattern, etc.)
-                local matching = ctx.options and ctx.options.matching
-                local matching_regex = ctx.options and ctx.options.matching_regex
-                local asset_pattern = ctx.options and ctx.options.asset_pattern
+                -- Get options from config and ctx.options (ctx.options take precedence)
+                local matching = (ctx.options and ctx.options.matching) or config.matching
+                local matching_regex = (ctx.options and ctx.options.matching_regex) or config.matching_regex
+                local asset_pattern = (ctx.options and ctx.options.asset_pattern) or config.asset_pattern
                 
                 -- asset_pattern takes precedence: direct pattern match
                 if asset_pattern then
@@ -129,7 +139,7 @@ function PLUGIN:BackendInstall(ctx)
                     -- Apply matching/matching_regex filters first
                     for _, asset in ipairs(data.assets) do
                         local name = asset.name or ""
-                        if name:match("%.phar$") and not name:match("%.asc$") and not name:match("%.sha") then
+                        if name:match("\.phar$") and not name:match("\.asc$") and not name:match("\.sha") then
                             local matches = true
                             
                             -- Check matching (substring)
@@ -172,8 +182,14 @@ function PLUGIN:BackendInstall(ctx)
         end
 
         cmd.exec("chmod +x " .. phar_path)
+        
+        -- Determine the executable name: rename_exe > bin > phar_name
+        local rename_exe = (ctx.options and ctx.options.rename_exe) or config.rename_exe
+        local bin_config = (ctx.options and ctx.options.bin) or config.bin
+        local exe_name = rename_exe or bin_config or phar_name
+        
         -- Create a FrankenPHP wrapper instead of a symlink
-        write_fp_wrapper(ctx.install_path .. "/" .. phar_name, phar_path)
+        write_fp_wrapper(ctx.install_path .. "/" .. exe_name, phar_path)
 
         return {}
 
