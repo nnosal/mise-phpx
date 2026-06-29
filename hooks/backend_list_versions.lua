@@ -84,11 +84,18 @@ function PLUGIN:BackendListVersions(ctx)
         local cmd  = require("cmd")
         local json = require("json")
         local a    = require("aliases")
-        local repo = a.resolve_phive(tool)
+        local resolved = a.resolve_phive(tool)
+        local repo   = type(resolved) == "table" and resolved.repo or resolved
+        local config = type(resolved) == "table" and resolved or {}
 
-        if not repo:match("/") then
+        if not repo or not repo:match("/") then
             error("PHAR tool must be vendor/repo format or a known alias")
         end
+
+        -- version_prefix: strip it from tags when listing (nil = default "v" behaviour)
+        -- prerelease: include pre-release tags when true (default: exclude)
+        local version_prefix    = (ctx.options and ctx.options.version_prefix) or config.version_prefix
+        local include_prerelease = (ctx.options and ctx.options.prerelease)     or config.prerelease
 
         local token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         local auth  = token and (" -H 'Authorization: Bearer " .. token .. "'") or ""
@@ -105,8 +112,18 @@ function PLUGIN:BackendListVersions(ctx)
         local versions = {}
         if type(data) == "table" then
             for _, release in ipairs(data) do
-                if release.tag_name and not release.prerelease and not release.draft then
-                    table.insert(versions, (release.tag_name:gsub("^v", "")))
+                local skip = not release.tag_name or release.draft
+                          or (not include_prerelease and release.prerelease)
+                if not skip then
+                    local ver = release.tag_name
+                    if version_prefix == nil then
+                        ver = ver:gsub("^v", "")
+                    elseif version_prefix ~= "" then
+                        if ver:sub(1, #version_prefix) == version_prefix then
+                            ver = ver:sub(#version_prefix + 1)
+                        end
+                    end
+                    table.insert(versions, ver)
                 end
             end
         end

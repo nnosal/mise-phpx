@@ -25,8 +25,9 @@ local PHIVE = {
     ["wp-blueprint"] = {
         repo = "WordPress/php-toolkit",
         asset_pattern = "blueprints.phar",
-        rename_exe = "wp-blueprint"
-    },
+        rename_exe = "wp-blueprint",
+        version_prefix = "v",
+    }
 }
 
 local function resolve_composer(tool)

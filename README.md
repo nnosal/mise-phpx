@@ -2,7 +2,7 @@
 
 A [mise](https://mise.jdx.dev) plugin providing a zero-dependency PHP toolchain built on [FrankenPHP](https://frankenphp.dev). No system PHP required. It's like npx, uvx, bunx but for modern php (8.3+) 😎.
 
-But that's not all, thanks to [phive](https://github.com/phar-io/phive) it will allow to simply add any PHAR CLI Tool like [composer](https://github.com/composer/composer) that... will allow to install any composer cli-package from [packagist](https://packagist.org/) repository.
+But that's not all, it allows you to install any PHAR CLI tool (like [composer](https://github.com/composer/composer)) directly from GitHub Releases — and any Composer package from [Packagist](https://packagist.org/). All tools execute under FrankenPHP, with no system PHP required.
 
 ## Backends
 
@@ -132,22 +132,54 @@ Any `vendor/package` form also works:
 
 ### phive — PHAR tools
 
-Install PHAR tools from GitHub Releases:
+Fetches PHAR assets directly from GitHub Releases (curl only — no phive binary required). Every installed PHAR runs under FrankenPHP, not the host PHP.
 
 ```toml
 [tools]
-"phpx:phive:pie"   = "1.4.4"
-"phpx:phive:phive" = "0.15.2"
+"phpx:phive:pie"          = "1.4.4"
+"phpx:phive:phive"        = "0.15.2"
+"phpx:phive:composer"     = "2.8.9"
+"phpx:phive:wp-blueprint" = "0.8.1"   # WordPress/php-toolkit → blueprints.phar
 ```
 
-Built-in short aliases: `pie` → `php/pie`, `phive` → `phar-io/phive`, `composer` → `composer/composer`.
+Built-in aliases:
 
-Any `vendor/repo` form also works:
+| Alias          | GitHub repo             | Installed as    |
+| -------------- | ----------------------- | --------------- |
+| `pie`          | `php/pie`               | `pie`           |
+| `phive`        | `phar-io/phive`         | `phive`         |
+| `composer`     | `composer/composer`     | `composer`      |
+| `wp-blueprint` | `WordPress/php-toolkit` | `wp-blueprint`  |
+
+Any `vendor/repo` form also works directly:
 
 ```toml
 [tools]
 "phpx:phive:my-org/my-tool" = "1.0.0"
 ```
+
+#### PHAR selection
+
+When a release ships multiple `.phar` files the plugin picks the one whose filename matches the repo name (e.g. `php-toolkit.phar` for `WordPress/php-toolkit`). If no name match is found the first `.phar` in the asset list is used. Provide `asset_pattern`, `matching`, or `matching_regex` to override this.
+
+#### Options
+
+These options follow the [mise GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html) naming conventions. They can be passed inline in `mise.toml`:
+
+```toml
+[tools]
+"phpx:phive:my-org/my-tool" = { version = "1.0.0-beta.1", version_prefix = "v", prerelease = "true" }
+```
+
+| Option           | Default    | Description |
+| ---------------- | ---------- | ----------- |
+| `version_prefix` | auto-probe | Prefix prepended to the version to form the GitHub release tag. `"v"` maps version `1.2.3` → tag `v1.2.3`. When unset, the plugin probes `v{version}` then bare `{version}` automatically. |
+| `prerelease`     | `false`    | Include pre-release GitHub releases when listing versions with `mise ls-remote`. |
+| `asset_pattern`  | —          | Glob pattern the asset filename must match exactly (e.g. `blueprints.phar`). Takes precedence over `matching`. |
+| `matching`       | —          | Plain-text substring the asset filename must contain. |
+| `matching_regex` | —          | Lua pattern the asset filename must match. |
+| `rename_exe`     | —          | Name for the generated wrapper script. Priority: `rename_exe` > `bin` > alias name > repo name. |
+| `bin`            | —          | Alternate exe name (lower priority than `rename_exe`). |
 
 ## Common workflows
 

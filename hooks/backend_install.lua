@@ -103,13 +103,30 @@ function PLUGIN:BackendInstall(ctx)
         cmd.exec("mkdir -p " .. ctx.install_path)
         local phar_name = repo:match("([^/]+)$")
 
-        -- Use GitHub API to find the actual PHAR asset URL
+        -- Use GitHub API to find the actual PHAR asset URL.
+        -- version_prefix controls how ctx.version maps to a release tag.
+        -- When nil, probe "v{version}" then bare version (safe default for unknown repos).
         local token   = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
         local auth    = token and (" -H 'Authorization: Bearer " .. token .. "'") or ""
-        local api_url = "https://api.github.com/repos/" .. repo .. "/releases/tags/" .. ctx.version
-        local api_ok, api_out = pcall(function()
-            return cmd.exec("curl -sL" .. auth .. " '" .. api_url .. "'")
-        end)
+        local version_prefix = (ctx.options and ctx.options.version_prefix) or config.version_prefix
+        local tags_to_try = version_prefix ~= nil
+            and { version_prefix .. ctx.version }
+            or  { "v" .. ctx.version, ctx.version }
+        local api_ok, api_out, tag_used
+        for _, tag in ipairs(tags_to_try) do
+            local api_url = "https://api.github.com/repos/" .. repo .. "/releases/tags/" .. tag
+            local ok, out = pcall(function()
+                return cmd.exec("curl -sL" .. auth .. " '" .. api_url .. "'")
+            end)
+            if ok and out and out ~= "" then
+                local probe = json.decode(out) or {}
+                if probe.assets then
+                    api_ok, api_out, tag_used = ok, out, tag
+                    break
+                end
+            end
+        end
+        if not tag_used then tag_used = (version_prefix or "v") .. ctx.version end
         local phar_url  = nil
         local phar_file = nil
         if api_ok and api_out and api_out ~= "" then
@@ -136,33 +153,39 @@ function PLUGIN:BackendInstall(ctx)
                         end
                     end
                 else
-                    -- Apply matching/matching_regex filters first
+                    -- Collect candidates filtered by matching/matching_regex
+                    local candidates = {}
                     for _, asset in ipairs(data.assets) do
                         local name = asset.name or ""
-                        if name:match("\.phar$") and not name:match("\.asc$") and not name:match("\.sha") then
+                        if name:match("%.phar$") and not name:match("%.asc$") and not name:match("%.sha") then
                             local matches = true
-                            
-                            -- Check matching (substring)
                             if matching and not name:find(matching, 1, true) then
                                 matches = false
                             end
-                            
-                            -- Check matching_regex
                             if matches and matching_regex then
-                                local ok, result = pcall(function()
-                                    return name:match(matching_regex)
-                                end)
-                                if not ok or not result then
-                                    matches = false
-                                end
+                                local ok, result = pcall(function() return name:match(matching_regex) end)
+                                if not ok or not result then matches = false end
                             end
-                            
                             if matches then
-                                phar_url  = asset.browser_download_url
-                                phar_file = name
+                                table.insert(candidates, asset)
+                            end
+                        end
+                    end
+                    -- Prefer the phar whose name matches the repo name (e.g. php-toolkit.phar
+                    -- over blueprints.phar when repo is WordPress/php-toolkit).
+                    -- Fall back to the first candidate when no name match is found.
+                    local picked = candidates[1]
+                    if not matching and not matching_regex then
+                        for _, asset in ipairs(candidates) do
+                            if (asset.name or ""):match("^" .. phar_name:gsub("%-", "%%-") .. "%.phar$") then
+                                picked = asset
                                 break
                             end
                         end
+                    end
+                    if picked then
+                        phar_url  = picked.browser_download_url
+                        phar_file = picked.name
                     end
                 end
             end
@@ -170,7 +193,7 @@ function PLUGIN:BackendInstall(ctx)
 
         if not phar_url then
             phar_file = phar_name .. ".phar"
-            phar_url  = "https://github.com/" .. repo .. "/releases/download/" .. ctx.version .. "/" .. phar_file
+            phar_url  = "https://github.com/" .. repo .. "/releases/download/" .. tag_used .. "/" .. phar_file
         end
 
         local phar_path = ctx.install_path .. "/" .. phar_file
@@ -183,10 +206,10 @@ function PLUGIN:BackendInstall(ctx)
 
         cmd.exec("chmod +x " .. phar_path)
         
-        -- Determine the executable name: rename_exe > bin > phar_name
+        -- Determine the executable name: rename_exe > bin > tool alias > phar_name
         local rename_exe = (ctx.options and ctx.options.rename_exe) or config.rename_exe
         local bin_config = (ctx.options and ctx.options.bin) or config.bin
-        local exe_name = rename_exe or bin_config or phar_name
+        local exe_name = rename_exe or bin_config or tool or phar_name
         
         -- Create a FrankenPHP wrapper instead of a symlink
         write_fp_wrapper(ctx.install_path .. "/" .. exe_name, phar_path)
