@@ -105,12 +105,54 @@ function PLUGIN:BackendInstall(ctx)
         if api_ok and api_out and api_out ~= "" then
             local data = json.decode(api_out) or {}
             if data.assets then
-                for _, asset in ipairs(data.assets) do
-                    local name = asset.name or ""
-                    if name:match("%.phar$") and not name:match("%.asc$") and not name:match("%.sha") then
-                        phar_url  = asset.browser_download_url
-                        phar_file = name
-                        break
+                -- Get options from tool config (matching, asset_pattern, etc.)
+                local matching = ctx.options and ctx.options.matching
+                local matching_regex = ctx.options and ctx.options.matching_regex
+                local asset_pattern = ctx.options and ctx.options.asset_pattern
+                
+                -- asset_pattern takes precedence: direct pattern match
+                if asset_pattern then
+                    for _, asset in ipairs(data.assets) do
+                        local name = asset.name or ""
+                        -- Simple glob-like pattern matching (* becomes .*)
+                        local pattern = asset_pattern:gsub(".", {
+                            ["*"] = ".*", ["."] = "%.", ["-"] = "%-",
+                            ["+"] = "%%+", ["?"] = "%?"
+                        })
+                        if name:match("^" .. pattern .. "$") then
+                            phar_url  = asset.browser_download_url
+                            phar_file = name
+                            break
+                        end
+                    end
+                else
+                    -- Apply matching/matching_regex filters first
+                    for _, asset in ipairs(data.assets) do
+                        local name = asset.name or ""
+                        if name:match("%.phar$") and not name:match("%.asc$") and not name:match("%.sha") then
+                            local matches = true
+                            
+                            -- Check matching (substring)
+                            if matching and not name:find(matching, 1, true) then
+                                matches = false
+                            end
+                            
+                            -- Check matching_regex
+                            if matches and matching_regex then
+                                local ok, result = pcall(function()
+                                    return name:match(matching_regex)
+                                end)
+                                if not ok or not result then
+                                    matches = false
+                                end
+                            end
+                            
+                            if matches then
+                                phar_url  = asset.browser_download_url
+                                phar_file = name
+                                break
+                            end
+                        end
                     end
                 end
             end
