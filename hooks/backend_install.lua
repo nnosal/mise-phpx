@@ -1,4 +1,4 @@
-local function write_fp_wrapper(path, target)
+local function write_fp_wrapper(path, target, php_binary)
     local f, err = io.open(path, "w")
     if not f then error("Cannot write wrapper " .. path .. ": " .. (err or "unknown error")) end
     f:write("#!/usr/bin/env bash\n")
@@ -6,7 +6,24 @@ local function write_fp_wrapper(path, target)
     f:write('case "$(uname -s)" in Darwin) _FP_BIN=frankenphp-mac ;; *) _FP_BIN=frankenphp-linux ;; esac\n')
     -- Inject PHP_INI_SCAN_DIR pointing to ini-scan/ which has a symlink to the active ini
     f:write('export PHP_INI_SCAN_DIR="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/ini-scan"\n')
+    if php_binary then
+        -- Some PHARs spawn subprocesses using PHP_BINARY; point them to our FrankenPHP shim
+        -- so they don't fall back to system php or use the PHAR itself as the interpreter.
+        f:write('export PHP_BINARY=' .. php_binary .. '\n')
+    end
     f:write('exec mise x "github:php/frankenphp@${PHPX_FRANKENPHP_VERSION:-latest}" -q --raw -- "${_FP_BIN}" php-cli ' .. target .. ' "$@"\n')
+    f:close()
+    os.execute("chmod +x " .. path)
+end
+
+local function write_php_shim(path)
+    local f, err = io.open(path, "w")
+    if not f then error("Cannot write PHP shim " .. path .. ": " .. (err or "unknown error")) end
+    -- Use native php (mise shim or system) so subprocess startup stays well under
+    -- the 5-second hardcoded timeout in eval_php_code_in_subprocess. libexec/ is
+    -- never on PATH so this cannot loop back to itself.
+    f:write("#!/usr/bin/env bash\n")
+    f:write('exec php "$@"\n')
     f:close()
     os.execute("chmod +x " .. path)
 end
@@ -210,9 +227,15 @@ function PLUGIN:BackendInstall(ctx)
         local rename_exe = (ctx.options and ctx.options.rename_exe) or config.rename_exe
         local bin_config = (ctx.options and ctx.options.bin) or config.bin
         local exe_name = rename_exe or bin_config or tool or phar_name
-        
-        -- Create a FrankenPHP wrapper instead of a symlink
-        write_fp_wrapper(ctx.install_path .. "/" .. exe_name, phar_path)
+
+        -- Create a PHP shim in libexec/ so PHAR subprocesses can use FrankenPHP
+        -- when they spawn child processes via PHP_BINARY (not exposed on PATH).
+        cmd.exec("mkdir -p " .. ctx.install_path .. "/libexec")
+        local php_shim = ctx.install_path .. "/libexec/php"
+        write_php_shim(php_shim)
+
+        -- Create a FrankenPHP wrapper, pointing PHP_BINARY to the shim
+        write_fp_wrapper(ctx.install_path .. "/" .. exe_name, phar_path, php_shim)
 
         return {}
 
