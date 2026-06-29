@@ -21,6 +21,11 @@ local PHIVE = {
     ["pie"]      = "php/pie",
     ["phive"]    = "phar-io/phive",
     ["composer"] = "composer/composer",
+    -- WordPress php-toolkit with blueprints.phar as default
+    ["php-toolkit"] = {
+        repo = "WordPress/php-toolkit",
+        asset_pattern = "blueprints.phar"
+    },
 }
 
 local function resolve_composer(tool)
@@ -30,7 +35,11 @@ local function resolve_composer(tool)
 end
 
 local function resolve_phive(tool)
-    return PHIVE[tool] or tool
+    if not tool or tool == "" then return tool end
+    -- If tool is an alias and has a definition, return it as-is (may be string or table)
+    if PHIVE[tool] then return PHIVE[tool] end
+    -- Otherwise return as-is (handles vendor/repo format)
+    return tool
 end
 
 local function resolve_phpx(version)
