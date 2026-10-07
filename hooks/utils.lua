@@ -1,14 +1,20 @@
 -- FrankenPHP runner shared by install and list-versions.
 -- Pin a version project-wide via PHPX_FRANKENPHP_VERSION (e.g. in mise.toml [env]).
 local fp_version = os.getenv("PHPX_FRANKENPHP_VERSION") or "latest"
-local fp_bin = "frankenphp-linux"
-local uname_f = io.popen("uname -s 2>/dev/null")
-if uname_f then
-    local uname_s = uname_f:read("*l") or ""
-    uname_f:close()
-    if uname_s:match("Darwin") then fp_bin = "frankenphp-mac" end
+
+-- Shell snippet (run inside `mise x github:php/frankenphp@V`) printing the path of
+-- the FrankenPHP binary. mise's github backend strips OS/arch suffixes from
+-- single-binary downloads (frankenphp-linux-x86_64 → frankenphp); older releases
+-- kept them, so probe the known names. Keep in sync with bin/phpx.
+local FP_SELECT = [[for b in frankenphp frankenphp-linux frankenphp-mac frankenphp-linux-x86_64 frankenphp-linux-aarch64 frankenphp-mac-arm64 frankenphp-mac-x86_64; do command -v "$b" && exit 0; done; echo "phpx: FrankenPHP binary not found in its mise install" >&2; exit 127]]
+
+-- Shell expression evaluating to the FrankenPHP binary path for a version
+-- (installs it through mise on first use).
+local function fp_bin_expr(version)
+    return '"$(mise x github:php/frankenphp@' .. version .. " -q --raw -- bash -c '" .. FP_SELECT .. "' _)\""
 end
-local FP = "mise x 'github:php/frankenphp@" .. fp_version .. "' -q --raw -- " .. fp_bin .. " php-cli"
+
+local FP = fp_bin_expr(fp_version) .. " php-cli"
 
 -- Plugin data directory: <MISE_DATA_DIR>/phpx (composer.phar, extensions, php shim).
 local function data_dir()
@@ -103,6 +109,8 @@ end
 
 return {
     FP                   = FP,
+    FP_SELECT            = FP_SELECT,
+    fp_bin_expr          = fp_bin_expr,
     data_dir             = data_dir,
     ensure_composer_phar = ensure_composer_phar,
     detect_backend       = detect_backend,

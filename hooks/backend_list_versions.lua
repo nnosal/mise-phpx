@@ -30,6 +30,22 @@ function PLUGIN:BackendListVersions(ctx)
         if #versions == 0 then
             return { versions = { "1.12.4" } }
         end
+
+        -- GitHub returns newest first; mise expects ascending (latest = last).
+        local function semver_lt(a, b)
+            local function parts(v)
+                local t = {}
+                for n in v:gmatch("(%d+)") do t[#t+1] = tonumber(n) end
+                return t
+            end
+            local av, bv = parts(a), parts(b)
+            for i = 1, math.max(#av, #bv) do
+                local ai, bi = av[i] or 0, bv[i] or 0
+                if ai ~= bi then return ai < bi end
+            end
+            return false
+        end
+        table.sort(versions, semver_lt)
         return { versions = versions }
 
     elseif backend == "composer" then
