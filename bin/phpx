@@ -6,13 +6,22 @@ set -eo pipefail
 FP_VERSION="${PHPX_FRANKENPHP_VERSION:-latest}"
 FP_BACKEND="github:php/frankenphp"
 
-# Resolve the FrankenPHP binary path for a version, installing it through mise on
-# first use. mise's github backend strips OS/arch suffixes from single-binary
-# downloads (frankenphp-linux-x86_64 → frankenphp); older releases kept them, so
-# probe the known names on the PATH that `mise x` builds for the tool.
-_FP_SELECT='for b in frankenphp frankenphp-linux frankenphp-mac frankenphp-linux-x86_64 frankenphp-linux-aarch64 frankenphp-mac-arm64 frankenphp-mac-x86_64; do command -v "$b" && exit 0; done; echo "phpx: FrankenPHP binary not found in its mise install" >&2; exit 127'
+# The mise github backend names the binary `frankenphp` (OS/arch suffixes stripped);
+# older releases kept them, hence the glob.
 fp_path() {
-    mise x "${FP_BACKEND}@${1:-$FP_VERSION}" -q --raw -- bash -c "$_FP_SELECT" _
+    # fp_path VERSION: path of the FrankenPHP binary, installing it through mise on first use.
+    # Uses `mise where` rather than a PATH lookup: the mise shims dir may hold a `frankenphp`
+    # shim (a symlink to mise itself) that would otherwise be picked up.
+    local v="$1" d b
+    d=$(mise where "github:php/frankenphp@$v" 2>/dev/null) || {
+        mise install -q "github:php/frankenphp@$v" >&2 || return 1
+        d=$(mise where "github:php/frankenphp@$v") || return 1
+    }
+    for b in "$d"/frankenphp* "$d"/bin/frankenphp*; do
+        [ -f "$b" ] && [ -x "$b" ] && { printf "%s\n" "$b"; return 0; }
+    done
+    echo "phpx: FrankenPHP binary not found in $d" >&2
+    return 1
 }
 
 # Plugin-managed extension directory.

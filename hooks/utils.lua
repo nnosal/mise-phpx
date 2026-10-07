@@ -2,16 +2,30 @@
 -- Pin a version project-wide via PHPX_FRANKENPHP_VERSION (e.g. in mise.toml [env]).
 local fp_version = os.getenv("PHPX_FRANKENPHP_VERSION") or "latest"
 
--- Shell snippet (run inside `mise x github:php/frankenphp@V`) printing the path of
--- the FrankenPHP binary. mise's github backend strips OS/arch suffixes from
--- single-binary downloads (frankenphp-linux-x86_64 → frankenphp); older releases
--- kept them, so probe the known names. Keep in sync with bin/phpx.
-local FP_SELECT = [[for b in frankenphp frankenphp-linux frankenphp-mac frankenphp-linux-x86_64 frankenphp-linux-aarch64 frankenphp-mac-arm64 frankenphp-mac-x86_64; do command -v "$b" && exit 0; done; echo "phpx: FrankenPHP binary not found in its mise install" >&2; exit 127]]
+-- Bash function resolving the FrankenPHP binary path (embedded in generated
+-- wrappers and the php shim; keep in sync with bin/phpx). Uses `mise where`:
+-- the mise github backend names the binary `frankenphp` (OS/arch suffixes
+-- stripped, older releases kept them, hence the glob), and a PATH lookup could
+-- hit the `frankenphp` shim mise creates (a symlink to mise itself).
+local FP_FN = [[fp_path() {
+    # fp_path VERSION: path of the FrankenPHP binary, installing it through mise on first use.
+    # Uses `mise where` rather than a PATH lookup: the mise shims dir may hold a `frankenphp`
+    # shim (a symlink to mise itself) that would otherwise be picked up.
+    local v="$1" d b
+    d=$(mise where "github:php/frankenphp@$v" 2>/dev/null) || {
+        mise install -q "github:php/frankenphp@$v" >&2 || return 1
+        d=$(mise where "github:php/frankenphp@$v") || return 1
+    }
+    for b in "$d"/frankenphp* "$d"/bin/frankenphp*; do
+        [ -f "$b" ] && [ -x "$b" ] && { printf "%s\n" "$b"; return 0; }
+    done
+    echo "phpx: FrankenPHP binary not found in $d" >&2
+    return 1
+}]]
 
--- Shell expression evaluating to the FrankenPHP binary path for a version
--- (installs it through mise on first use).
+-- Shell expression evaluating to the FrankenPHP binary path for a version.
 local function fp_bin_expr(version)
-    return '"$(mise x github:php/frankenphp@' .. version .. " -q --raw -- bash -c '" .. FP_SELECT .. "' _)\""
+    return '"$(bash -c \'' .. FP_FN .. '; fp_path "$1"\' _ ' .. version .. ')"'
 end
 
 local FP = fp_bin_expr(fp_version) .. " php-cli"
@@ -109,7 +123,7 @@ end
 
 return {
     FP                   = FP,
-    FP_SELECT            = FP_SELECT,
+    FP_FN                = FP_FN,
     fp_bin_expr          = fp_bin_expr,
     data_dir             = data_dir,
     ensure_composer_phar = ensure_composer_phar,
