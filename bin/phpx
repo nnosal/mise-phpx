@@ -105,14 +105,26 @@ case "${ARGS[0]:-}" in
                     echo "Usage: phpx -x install <extension>"
                     exit 1
                 fi
-                # Find pie.phar from the installed pie wrapper in PATH.
-                # Bypass mise x phpx:phive:pie to preserve PATH through the call chain.
-                _PIE_DIR=$(dirname "$(which pie 2>/dev/null)" 2>/dev/null)
-                _PIE_PHAR="${_PIE_DIR}/pie.phar"
-                if [[ ! -f "$_PIE_PHAR" ]]; then
-                    echo "phpx: pie not found. Add \"phpx:phive:pie\" to your mise.toml." >&2
-                    exit 1
-                fi
+                # Locate pie.phar. Bypass `mise x phpx:phive:pie` to preserve PATH through
+                # the call chain. Order: pie wrapper on PATH → any installed phpx:phive:pie
+                # (highest version) → auto-install the latest release.
+                _find_pie_phar() {
+                    local dir cand
+                    dir=$(dirname "$(which pie 2>/dev/null)" 2>/dev/null)
+                    [[ -n "$dir" && -f "$dir/pie.phar" ]] && { echo "$dir/pie.phar"; return 0; }
+                    cand=$(ls -d "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/phpx-phive-pie/*/pie.phar 2>/dev/null \
+                        | sort -V | tail -1)
+                    [[ -n "$cand" && -f "$cand" ]] && { echo "$cand"; return 0; }
+                    return 1
+                }
+                _PIE_PHAR=$(_find_pie_phar) || {
+                    echo "phpx: pie not found, installing phpx:phive:pie@latest (one-time)..." >&2
+                    mise install -q "phpx:phive:pie@latest" >&2 || true
+                    _PIE_PHAR=$(_find_pie_phar) || {
+                        echo "phpx: pie not found. Add \"phpx:phive:pie\" to your mise.toml and run: mise install" >&2
+                        exit 1
+                    }
+                }
                 # Create a php wrapper — PIE uses PhpExecutableFinder which searches PATH.
                 # php-cli -r support was added in FrankenPHP ~1.11.x; older versions treat -r as a file.
                 # Use latest for anything below 1.11.0 to guarantee -r works.
@@ -322,10 +334,9 @@ case "${ARGS[0]:-}" in
                 mkdir -p "$PHPX_DATA"
                 {
                     printf '; Auto-managed by phpx -x install. Do not edit manually.\n'
-                    printf 'extension_dir = %s\n' "$_LOCAL_EXT_DIR"
                     for _so in "$_LOCAL_EXT_DIR"/*.so; do
                         [[ -f "$_so" ]] || continue
-                        printf 'extension = %s\n' "$(basename "$_so" .so)"
+                        printf 'extension = %s\n' "$_so"
                     done
                 } > "$PHPX_INI"
                 _rem=$(grep -c "^extension = " "$PHPX_INI" 2>/dev/null; true)
@@ -413,7 +424,7 @@ Options:
   -S <addr:port>         Run built-in web server
   -r <code>             Execute PHP code
   -f <file>             Parse and execute file
-  -x, --ext <cmd> [args] Extension manager (install, list, show)
+  -x, --ext <cmd> [args] Extension manager (install, uninstall, list, show)
   composer [args]        Use composer directly
   --composer [args]      Use composer tool
   --version, -v         Display version info
@@ -431,7 +442,9 @@ Examples:
   phpx -S localhost:8000                  Start web server
   phpx script.php                         Execute script
   phpx -r 'echo "Hello";'                 Run code
-  phpx -x install php/ext-redis           Install extension
+  phpx -x install mongodb/mongodb-extension   Install a PIE extension
+  phpx -x install microsoft/pdo_sqlsrv        (pie is auto-installed if missing)
+  phpx -x list                                List installed extensions
   phpx frankenphp@1.0.0 -v                Check version with specific frankenphp
   phpx composer:cpx@1.0.2 -- --version    Use cpx version 1.0.2
 

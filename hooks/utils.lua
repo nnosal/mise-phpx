@@ -46,6 +46,30 @@ local function detect_backend(ctx)
     return "phpx"
 end
 
+-- Single-quotes a value for safe interpolation into a shell command.
+local function shell_quote(s)
+    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+-- Normalises a tool option into a list of strings.
+-- mise passes scalar options as strings and TOML arrays as Lua tables; a string
+-- may also hold several entries separated by commas and/or whitespace.
+--   opt_list(nil)                 → {}
+--   opt_list("a/b:^1 c/d")        → {"a/b:^1", "c/d"}
+--   opt_list({"a/b:^1", "c/d"})   → {"a/b:^1", "c/d"}
+local function opt_list(v)
+    local out = {}
+    if v == nil then return out end
+    if type(v) == "table" then
+        for _, item in ipairs(v) do
+            if item ~= nil and tostring(item) ~= "" then out[#out + 1] = tostring(item) end
+        end
+        return out
+    end
+    for item in tostring(v):gmatch("[^,%s]+") do out[#out + 1] = item end
+    return out
+end
+
 -- Strips the sub-backend prefix: "composer:cpx" → "cpx", "phpx" → "phpx"
 local function get_tool(ctx)
     if ctx and ctx.tool then
@@ -59,4 +83,6 @@ return {
     ensure_composer_phar = ensure_composer_phar,
     detect_backend       = detect_backend,
     get_tool             = get_tool,
+    shell_quote          = shell_quote,
+    opt_list             = opt_list,
 }

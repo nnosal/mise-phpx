@@ -49,6 +49,27 @@ function PLUGIN:BackendInstall(ctx)
         pcall(function()
             cmd.exec("mise x 'github:php/frankenphp@" .. fp_version .. "' -q --raw -- " .. fp_bin .. " --version")
         end)
+
+        -- extensions = "mongodb/mongodb-extension microsoft/pdo_sqlsrv" (or a TOML array)
+        -- Compiles/installs each PIE package via `phpx -x install` so extensions are
+        -- provisioned declaratively from mise.toml, pinned to this FrankenPHP version.
+        local extensions = utils.opt_list(ctx.options and ctx.options.extensions)
+        if #extensions > 0 then
+            local plugin_dir = os.getenv("MISE_PLUGIN_DIR") or os.getenv("MISE_PLUGIN_PATH")
+            if not plugin_dir then
+                error("Cannot locate plugin directory to run `phpx -x install`")
+            end
+            local phpx_bin = plugin_dir .. "/bin/phpx"
+            for _, ext in ipairs(extensions) do
+                local ok, out = pcall(function()
+                    return cmd.exec("PHPX_FRANKENPHP_VERSION=" .. utils.shell_quote(fp_version)
+                        .. " " .. utils.shell_quote(phpx_bin) .. " -x install " .. utils.shell_quote(ext) .. " 2>&1")
+                end)
+                if not ok then
+                    error("Failed to install PHP extension " .. ext .. ":\n" .. tostring(out))
+                end
+            end
+        end
         return {}
 
     elseif backend == "composer" then
@@ -56,14 +77,71 @@ function PLUGIN:BackendInstall(ctx)
         local a   = require("aliases")
         local package = a.resolve_composer(tool)
 
+        local q    = utils.shell_quote
+        local opts = ctx.options or {}
+
         os.execute("mkdir -p " .. ctx.install_path)
         local phar = utils.ensure_composer_phar(cmd)
+        local composer_json = ctx.install_path .. "/composer.json"
 
-        local result = cmd.exec(utils.FP .. " " .. phar
-            .. " require " .. package .. ":" .. ctx.version
-            .. " --working-dir=" .. ctx.install_path .. " --no-interaction --quiet")
-        if result and result:match("Your requirements could not") then
-            error("Failed to install " .. package .. "@" .. ctx.version)
+        local function composer(args)
+            return utils.FP .. " " .. phar .. " " .. args
+                .. " --working-dir=" .. q(ctx.install_path) .. " --no-interaction"
+        end
+
+        -- composer_json = "path/to/composer.json": seed the install project with a
+        -- user-provided manifest (require-dev, config.allow-plugins, repositories, ...).
+        -- Relative paths resolve against the mise project root, then the current dir.
+        if opts.composer_json and opts.composer_json ~= "" then
+            local src = tostring(opts.composer_json)
+            if not src:match("^/") then
+                local root = os.getenv("MISE_PROJECT_ROOT") or os.getenv("PWD") or "."
+                src = root .. "/" .. src
+            end
+            local f = io.open(src, "r")
+            if not f then error("composer_json file not found: " .. src) end
+            f:close()
+            cmd.exec("cp " .. q(src) .. " " .. q(composer_json))
+        end
+
+        -- `composer config` refuses to run without a composer.json; start from an empty one.
+        local f = io.open(composer_json, "r")
+        if f then f:close() else
+            f = io.open(composer_json, "w")
+            if f then f:write("{}\n") f:close() end
+        end
+
+        -- allow_plugins = "phpstan/extension-installer" (or "true" to allow every plugin)
+        for _, plugin in ipairs(utils.opt_list(opts.allow_plugins)) do
+            if plugin == "true" or plugin == "*" then
+                cmd.exec(composer("config allow-plugins true"))
+            else
+                cmd.exec(composer("config " .. q("allow-plugins." .. plugin) .. " true"))
+            end
+        end
+
+        -- config = "process-timeout=600 platform.php=8.3" → composer config <key> <value>
+        for _, kv in ipairs(utils.opt_list(opts.config)) do
+            local key, value = kv:match("^([^=]+)=(.*)$")
+            if not key then
+                error("Invalid composer config entry '" .. kv .. "' (expected key=value)")
+            end
+            cmd.exec(composer("config " .. q(key) .. " " .. q(value)))
+        end
+
+        -- extra = "phpstan/phpstan-strict-rules:^2.0 phpstan/extension-installer"
+        -- Extra packages are required together with the main one so Composer solves
+        -- all constraints at once. A package without constraint lets Composer pick.
+        local specs = { q(package .. ":" .. ctx.version) }
+        for _, extra in ipairs(utils.opt_list(opts.extra)) do
+            specs[#specs + 1] = q(extra)
+        end
+
+        local ok, result = pcall(function()
+            return cmd.exec(composer("require " .. table.concat(specs, " ")) .. " 2>&1")
+        end)
+        if not ok or (result and result:match("Your requirements could not")) then
+            error("Failed to install " .. package .. "@" .. ctx.version .. ":\n" .. tostring(result))
         end
 
         local pkg_dir = ctx.install_path .. "/vendor/" .. package
