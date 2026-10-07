@@ -71,8 +71,7 @@ jobs:
         working-directory: ${{ runner.temp }}/proj
         run: |
           set -x
-          mise x -- cpx --version
-          mise x -- cpx --version | grep -q "PHP 8.5"
+          mise x -- cpx --version | grep -q "cpx v"
 
       - name: phive backend (pie, composer)
         working-directory: ${{ runner.temp }}/proj

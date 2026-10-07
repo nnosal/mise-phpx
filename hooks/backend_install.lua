@@ -158,12 +158,13 @@ function PLUGIN:BackendInstall(ctx)
             end
             local phpx_bin = plugin_dir .. "/bin/phpx"
             for _, ext in ipairs(extensions) do
-                local ok, out = pcall(function()
-                    return cmd.exec("PHPX_FRANKENPHP_VERSION=" .. utils.shell_quote(fp_version)
-                        .. " " .. utils.shell_quote(phpx_bin) .. " -x install " .. utils.shell_quote(ext) .. " 2>&1")
-                end)
-                if not ok then
-                    error("Failed to install PHP extension " .. ext .. ":\n" .. tostring(out))
+                -- cmd.exec drops the output on non-zero exit; capture it via a marker.
+                local out = cmd.exec("PHPX_FRANKENPHP_VERSION=" .. utils.shell_quote(fp_version)
+                    .. " " .. utils.shell_quote(phpx_bin) .. " -x install " .. utils.shell_quote(ext)
+                    .. " 2>&1 || echo __PHPX_EXT_FAILED__") or ""
+                if out:match("__PHPX_EXT_FAILED__") then
+                    error("Failed to install PHP extension " .. ext .. ":\n"
+                        .. (out:gsub("__PHPX_EXT_FAILED__%s*$", "")))
                 end
             end
         end
