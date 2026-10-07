@@ -1,0 +1,41 @@
+name: debug
+on:
+  push:
+  workflow_dispatch:
+env:
+  MISE_YES: "1"
+  MISE_VERSION_CHECK: "0"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  probe:
+    name: probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - name: Probe FrankenPHP install layout
+        run: |
+          set -x
+          echo "PATH=$PATH" | tr ':' '\n'
+          mise install "github:php/frankenphp@1.11.3"
+          D=$(mise where "github:php/frankenphp@1.11.3"); echo "where=$D"; ls -la "$D" "$D"/bin 2>/dev/null || true
+          mise x "github:php/frankenphp@1.11.3" -q --raw -- bash -c 'echo "PATH inside mise x:"; echo "$PATH" | tr ":" "\n" | head -5; echo "command -v frankenphp = $(command -v frankenphp)"; ls -la "$(command -v frankenphp)"; file "$(command -v frankenphp)" || true'
+          SELECT='for b in frankenphp frankenphp-linux frankenphp-mac frankenphp-linux-x86_64 frankenphp-linux-aarch64 frankenphp-mac-arm64 frankenphp-mac-x86_64; do command -v "$b" && exit 0; done; echo "not found" >&2; exit 127'
+          OUT=$(mise x "github:php/frankenphp@1.11.3" -q --raw -- bash -c "$SELECT" _)
+          echo "--- OUT (od):"; printf '%s' "$OUT" | od -c | head -5
+          echo "--- argv as seen by php-cli:"
+          "$OUT" php-cli -r 'var_dump($_SERVER["argv"]);' a b || true
+          printf '<?php var_dump($_SERVER["argv"], PHP_BINARY);\n' > /tmp/argv.php
+          "$OUT" php-cli /tmp/argv.php x y || true
+          echo "--- real binary direct:"
+          "$D/frankenphp" php-cli /tmp/argv.php x y || ls "$D"
+          echo "--- via mise x:"
+          mise x "github:php/frankenphp@1.11.3" -q --raw -- frankenphp php-cli /tmp/argv.php x y || true
+          echo "--- shims dir:"; ls -la ~/.local/share/mise/shims 2>/dev/null | head || true
