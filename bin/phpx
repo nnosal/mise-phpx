@@ -5,9 +5,30 @@ set -eo pipefail
 
 FP_VERSION="${PHPX_FRANKENPHP_VERSION:-latest}"
 FP_BACKEND="github:php/frankenphp"
+PHPX_DATA="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx"
 
 # The mise github backend names the binary `frankenphp` (OS/arch suffixes stripped);
 # older releases kept them, hence the glob.
+# argv-normalising bootstrap for scripts/PHARs (see libexec/phpx-run.php)
+PHPX_RUN="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)/libexec/phpx-run.php"
+[[ -f "$PHPX_RUN" ]] || PHPX_RUN="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/libexec/phpx-run.php"
+
+# fp_php VERSION [php-cli args...]: run FrankenPHP php-cli; a leading script path
+# goes through the bootstrap so $argv looks like php's on every FrankenPHP version.
+# PHP_BINARY follows argv[0] on FrankenPHP >= 1.13: point it at the shared php shim
+# (when installed) so tools spawning PHP_BINARY get php-compatible flag handling.
+PHPX_SHIM="${PHPX_DATA}/libexec/php"
+fp_php() {
+    local v="$1" bin argv0; shift
+    bin=$(fp_path "$v") || return 127
+    argv0="$bin"; [[ -x "$PHPX_SHIM" ]] && argv0="$PHPX_SHIM"
+    if [[ $# -gt 0 && "$1" != -* && -f "$1" ]]; then
+        ( exec -a "$argv0" "$bin" php-cli "$PHPX_RUN" "$@" )
+    else
+        ( exec -a "$argv0" "$bin" php-cli "$@" )
+    fi
+}
+
 fp_path() {
     # fp_path VERSION: path of the FrankenPHP binary, installing it through mise on first use.
     # Uses `mise where` rather than a PATH lookup: the mise shims dir may hold a `frankenphp`
@@ -27,7 +48,6 @@ fp_path() {
 # Plugin-managed extension directory.
 # Each PHP API version gets its own .ini in extensions.d/ so only matching
 # extensions are loaded — no startup warnings when switching PHP versions.
-PHPX_DATA="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx"
 # One .ini file per PHP API version, stored in extensions.d/.
 # PHP_INI_SCAN_DIR scans extensions.d/ — only the symlink "active.ini" is active,
 # pointing to the ini for the current PHP API version.
@@ -36,7 +56,7 @@ mkdir -p "$PHPX_EXT_D"
 # Determine current PHP API version from running FrankenPHP
 _cur_api_php=$(mktemp /tmp/phpx-api-XXXXXX.php)
 printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_cur_api_php"
-_cur_ext_dir=$(PHP_INI_SCAN_DIR="" "$(fp_path "${FP_VERSION}")" php-cli "$_cur_api_php" 2>/dev/null || echo "")
+_cur_ext_dir=$(PHP_INI_SCAN_DIR="" fp_php "${FP_VERSION}" "$_cur_api_php" 2>/dev/null || echo "")
 rm -f "$_cur_api_php"
 _cur_api=$(basename "$_cur_ext_dir")  # e.g. no-debug-zts-20240924
 PHPX_INI="${PHPX_EXT_D}/${_cur_api:-default}.ini"
@@ -104,7 +124,7 @@ case "${ARGS[0]:-}" in
             mkdir -p "$(dirname "$COMPOSER_PHAR")"
             curl -sL https://getcomposer.org/composer.phar -o "$COMPOSER_PHAR"
         fi
-        exec "$(fp_path "${FP_VERSION}")" php-cli "$COMPOSER_PHAR" "${ARGS[@]:1}"
+        fp_php "${FP_VERSION}" "$COMPOSER_PHAR" "${ARGS[@]:1}"
         ;;
     -x|--ext)
         if [[ ${#ARGS[@]} -lt 2 ]]; then
@@ -121,13 +141,14 @@ case "${ARGS[0]:-}" in
                 # Locate pie.phar. Bypass `mise x phpx:phive:pie` to preserve PATH through
                 # the call chain. Order: pie wrapper on PATH → any installed phpx:phive:pie
                 # (highest version) → auto-install the latest release.
+                # Never resolve through PATH: mise creates a shim for every executable at
+                # an install root (a symlink to mise itself), including a legacy pie.phar.
                 _find_pie_phar() {
-                    local dir cand
-                    dir=$(dirname "$(which pie 2>/dev/null)" 2>/dev/null)
-                    [[ -n "$dir" && -f "$dir/pie.phar" ]] && { echo "$dir/pie.phar"; return 0; }
-                    cand=$(ls -d "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/phpx-phive-pie/*/pie.phar 2>/dev/null \
+                    local cand
+                    cand=$(ls -d "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/phpx-phive-pie/*/libexec/pie.phar \
+                                 "${MISE_DATA_DIR:-$HOME/.local/share/mise}"/installs/phpx-phive-pie/*/pie.phar 2>/dev/null \
                         | sort -V | tail -1)
-                    [[ -n "$cand" && -f "$cand" ]] && { echo "$cand"; return 0; }
+                    [[ -n "$cand" && -f "$cand" && ! -L "$cand" ]] && { echo "$cand"; return 0; }
                     return 1
                 }
                 _PIE_PHAR=$(_find_pie_phar) || {
@@ -149,16 +170,18 @@ case "${ARGS[0]:-}" in
                 # FrankenPHP php-cli only supports -r for inline code; map common PHP
                 # flags that PIE calls (-i for phpinfo, -m for modules, --ini, etc.)
                 _FP_CMD="$(fp_path "${_PIE_FP_VERSION}") php-cli"
+                _FP_RUN_CMD="$_FP_CMD $PHPX_RUN"
                 # Detect extension_dir dynamically from the active FrankenPHP version.
                 _EXT_BASE="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/extensions"
                 _xtmp=$(mktemp /tmp/phpx-xt-XXXXXX.php); printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_xtmp"
-                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" "$(fp_path "${FP_VERSION}")" php-cli "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
+                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" fp_php "${FP_VERSION}" "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
                 _EXT_API=$(basename "${_FP_EXT_DIR}")  # e.g. no-debug-zts-20240924
                 _LOCAL_EXT_DIR="${_EXT_BASE}/${_EXT_API}"
                 mkdir -p "$_LOCAL_EXT_DIR"
                 {
                     printf '#!/usr/bin/env bash\n'
                     printf '_FP=%s\n' "'${_FP_CMD}'"
+                    printf '_FPR=%s\n' "'${_FP_RUN_CMD}'"
                     printf 'case "$1" in\n'
                     # PIE parses phpinfo() text output (regex on plain-text format).
                     # FrankenPHP outputs HTML even in CLI mode, so we generate the text format manually.
@@ -168,7 +191,7 @@ case "${ARGS[0]:-}" in
                     printf '  -m)        $_FP -r %s ;;\n'        "'echo \"[PHP Modules]\";foreach(get_loaded_extensions() as \$e){echo \$e.PHP_EOL;}'"
                     printf '  --ini)     $_FP -r %s ;;\n'        "'echo php_ini_loaded_file();'"
                     printf '  --version) $_FP -r %s ;;\n'        "'echo \"PHP \".PHP_VERSION.\" (cli)\";'"
-                    printf '  *)         $_FP "$@" ;;\n'
+                    printf '  *)         if [[ -f "$1" ]]; then $_FPR "$@"; else $_FP "$@"; fi ;;\n'
                     printf 'esac\n'
                 } > "$_PHP_DIR/php"
                 chmod +x "$_PHP_DIR/php"
@@ -177,7 +200,7 @@ case "${ARGS[0]:-}" in
                 # using a temp PHP file so it works with old FrankenPHP versions that lack -r support.
                 _ver_php=$(mktemp /tmp/phpx-ver-XXXXXX.php)
                 printf '<?php echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;\n' > "$_ver_php"
-                _FP_PHP_VER=$(PHP_INI_SCAN_DIR="" "$(fp_path "${FP_VERSION}")" php-cli "$_ver_php" 2>/dev/null || echo "")
+                _FP_PHP_VER=$(PHP_INI_SCAN_DIR="" fp_php "${FP_VERSION}" "$_ver_php" 2>/dev/null || echo "")
                 rm -f "$_ver_php"
                 _PHPIZE=""
                 _PHPCONFIG=""
@@ -295,7 +318,7 @@ case "${ARGS[0]:-}" in
                 # Unset PHP_INI_SCAN_DIR so existing extensions don't interfere with PIE's PHP detection
                 PHP_BINARY="$_PHP_DIR/php" PHP_PATH="$_PHP_DIR/php" PATH="$_PHP_DIR:$PATH" \
                 PHP_INI_SCAN_DIR="" COMPOSER_AUTH="${_COMPOSER_AUTH}" \
-                "$(fp_path "${_PIE_FP_VERSION}")" php-cli "$_PIE_PHAR" install \
+                fp_php "${_PIE_FP_VERSION}" "$_PIE_PHAR" install \
                     --auto-install-build-tools ${_PHPIZE_OPT} ${_PHPCONFIG_OPT} "${ARGS[@]:2}"
                 _rc=$?
 
@@ -329,7 +352,7 @@ case "${ARGS[0]:-}" in
                 fi
                 _EXT_BASE="${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/extensions"
                 _xtmp=$(mktemp /tmp/phpx-xt-XXXXXX.php); printf '<?php echo PHP_EXTENSION_DIR;\n' > "$_xtmp"
-                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" "$(fp_path "${_PIE_FP_VERSION}")" php-cli "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
+                _FP_EXT_DIR=$(PHP_INI_SCAN_DIR="" fp_php "${_PIE_FP_VERSION}" "$_xtmp" 2>/dev/null || echo ""); rm -f "$_xtmp"
                 _LOCAL_EXT_DIR="${_EXT_BASE}/$(basename "${_FP_EXT_DIR}")"
 
                 # Derive extension name: asgrim/example-pie-extension → example_pie_extension
@@ -399,7 +422,7 @@ case "${ARGS[0]:-}" in
             mkdir -p "$(dirname "$COMPOSER_PHAR")"
             curl -sL https://getcomposer.org/composer.phar -o "$COMPOSER_PHAR"
         fi
-        exec "$(fp_path "${FP_VERSION}")" php-cli "$COMPOSER_PHAR" "${ARGS[@]:1}"
+        fp_php "${FP_VERSION}" "$COMPOSER_PHAR" "${ARGS[@]:1}"
         ;;
     --version|-v)
         raw=$("$(fp_path "${FP_VERSION}")" --version 2>&1 | head -1) || {
@@ -431,13 +454,13 @@ case "${ARGS[0]:-}" in
             echo "Usage: php -r '<code>'"
             exit 1
         fi
-        exec "$(fp_path "${FP_VERSION}")" php-cli -r "${ARGS[1]}" "${ARGS[@]:2}"
+        fp_php "${FP_VERSION}" -r "${ARGS[1]}" "${ARGS[@]:2}"
         ;;
     "")
         exec "$0" --help
         ;;
     -f)
-        exec "$(fp_path "${FP_VERSION}")" php-cli "${ARGS[@]}"
+        fp_php "${FP_VERSION}" "${ARGS[@]}"
         ;;
     --help|-h)
         cat <<'EOF'
@@ -477,6 +500,6 @@ EOF
         exit 0
         ;;
     *)
-        exec "$(fp_path "${FP_VERSION}")" php-cli "${ARGS[@]}"
+        fp_php "${FP_VERSION}" "${ARGS[@]}"
         ;;
 esac

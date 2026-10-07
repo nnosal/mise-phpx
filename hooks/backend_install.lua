@@ -19,7 +19,10 @@ local function write_fp_wrapper(path, target, php_shim)
         f:write('export PATH=' .. shim_dir .. ':"$PATH"\n')
         f:write('export PHP_BINARY=' .. php_shim .. ' PHP_PATH=' .. php_shim .. '\n')
     end
-    f:write('exec "$_FP_BIN" php-cli ' .. target .. ' "$@"\n')
+    -- exec -a: FrankenPHP >= 1.13 derives PHP_BINARY from argv[0]; naming it after
+    -- our php shim keeps re-exec'ing tools (PHPStan Turbo) on the shim path.
+    local argv0 = php_shim and ('-a ' .. php_shim .. ' ') or ''
+    f:write('exec ' .. argv0 .. '"$_FP_BIN" php-cli ' .. utils.run_php() .. ' ' .. target .. ' "$@"\n')
     f:close()
     os.execute("chmod +x " .. path)
 end
@@ -31,7 +34,8 @@ end
 -- The shim lives in <MISE_DATA_DIR>/phpx/libexec (shared by every tool): mise
 -- strips any PATH entry under its installs/ directory when it re-computes PATH
 -- for a nested `mise x`, so a per-install libexec/ would never reach subprocesses.
-local function write_php_shim(path)
+local function write_php_shim(path, ctx)
+    require("utils").ensure_run_php(ctx)
     local f, err = io.open(path, "w")
     if not f then error("Cannot write PHP shim " .. path .. ": " .. (err or "unknown error")) end
     local utils = require("utils")
@@ -41,6 +45,10 @@ local function write_php_shim(path)
 __FP_FN__
 _FP_BIN=$(fp_path "${PHPX_FRANKENPHP_VERSION:-latest}") || exit 127
 _FP="$_FP_BIN php-cli"
+_RUN="__RUN_PHP__"
+# FrankenPHP >= 1.13 derives PHP_BINARY from argv[0] (when it exists): keep it on
+# this shim so tools that re-exec or spawn PHP_BINARY get php-compatible flags.
+_SELF="${BASH_SOURCE[0]}"; [[ "$_SELF" == /* ]] || _SELF="$(cd "$(dirname "$_SELF")" && pwd)/$(basename "$_SELF")"
 _SCAN_SRC="${PHP_INI_SCAN_DIR:-${MISE_DATA_DIR:-$HOME/.local/share/mise}/phpx/ini-scan}"
 _TMP=$(mktemp -d "${TMPDIR:-/tmp}/phpx-ini-XXXXXX") || exit 1
 _cleanup() { rm -rf "$_TMP"; }
@@ -96,8 +104,12 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
-PHP_INI_SCAN_DIR="$_TMP" $_FP "$@"
-]=]):gsub("__FP_FN__", function() return utils.FP_FN end)))
+if [[ $# -gt 0 && "$1" != -* && -f "$1" ]]; then
+    ( export PHP_INI_SCAN_DIR="$_TMP"; exec -a "$_SELF" "$_FP_BIN" php-cli "$_RUN" "$@" )
+else
+    ( export PHP_INI_SCAN_DIR="$_TMP"; exec -a "$_SELF" "$_FP_BIN" php-cli "$@" )
+fi
+]=]):gsub("__FP_FN__", function() return utils.FP_FN end):gsub("__RUN_PHP__", function() return utils.run_php() end)))
     f:close()
     os.execute("chmod +x " .. path)
 end
@@ -133,7 +145,7 @@ function PLUGIN:BackendInstall(ctx)
         local php_shim = utils.data_dir() .. "/libexec/php"
         os.execute("mkdir -p " .. utils.shell_quote(utils.data_dir() .. "/libexec")
             .. " " .. utils.shell_quote(ctx.install_path .. "/bin"))
-        write_php_shim(php_shim)
+        write_php_shim(php_shim, ctx)
         os.execute("ln -sf " .. utils.shell_quote(php_shim) .. " " .. utils.shell_quote(ctx.install_path .. "/bin/php"))
 
         -- extensions = "mongodb/mongodb-extension microsoft/pdo_sqlsrv" (or a TOML array)
@@ -166,6 +178,7 @@ function PLUGIN:BackendInstall(ctx)
         local opts = ctx.options or {}
 
         os.execute("mkdir -p " .. ctx.install_path)
+        utils.ensure_run_php(ctx)
         local phar = utils.ensure_composer_phar(cmd)
         local composer_json = ctx.install_path .. "/composer.json"
 
@@ -253,7 +266,7 @@ function PLUGIN:BackendInstall(ctx)
         -- PHP shim for subprocesses spawned by the tools (see write_php_shim)
         local php_shim = utils.data_dir() .. "/libexec/php"
         os.execute("mkdir -p " .. q(utils.data_dir() .. "/libexec"))
-        write_php_shim(php_shim)
+        write_php_shim(php_shim, ctx)
 
         -- Create FrankenPHP wrappers for each vendor/bin script
         local bin_dir = ctx.install_path .. "/bin"
@@ -385,7 +398,10 @@ function PLUGIN:BackendInstall(ctx)
             phar_url  = "https://github.com/" .. repo .. "/releases/download/" .. tag_used .. "/" .. phar_file
         end
 
-        local phar_path = ctx.install_path .. "/" .. phar_file
+        -- Keep the PHAR out of the install root and non-executable: mise shims every
+        -- executable found at an install root (as a symlink to mise itself).
+        cmd.exec("mkdir -p " .. utils.shell_quote(ctx.install_path .. "/libexec"))
+        local phar_path = ctx.install_path .. "/libexec/" .. phar_file
         cmd.exec("curl -sL -o " .. phar_path .. " " .. phar_url)
 
         local _, stat = pcall(function() return cmd.exec("test -s " .. phar_path .. " && echo ok") end)
@@ -393,8 +409,7 @@ function PLUGIN:BackendInstall(ctx)
             error("Failed to download " .. phar_file .. " from " .. phar_url)
         end
 
-        cmd.exec("chmod +x " .. phar_path)
-        
+
         -- Determine the executable name: rename_exe > bin > tool alias > phar_name
         local rename_exe = (ctx.options and ctx.options.rename_exe) or config.rename_exe
         local bin_config = (ctx.options and ctx.options.bin) or config.bin
@@ -403,7 +418,7 @@ function PLUGIN:BackendInstall(ctx)
         -- PHP shim for subprocesses spawned by the PHAR (see write_php_shim)
         local php_shim = utils.data_dir() .. "/libexec/php"
         os.execute("mkdir -p " .. utils.shell_quote(utils.data_dir() .. "/libexec"))
-        write_php_shim(php_shim)
+        write_php_shim(php_shim, ctx)
 
         -- Create a FrankenPHP wrapper, pointing PHP_BINARY to the shim
         write_fp_wrapper(ctx.install_path .. "/" .. exe_name, phar_path, php_shim)

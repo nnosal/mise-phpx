@@ -28,7 +28,6 @@ local function fp_bin_expr(version)
     return '"$(bash -c \'' .. FP_FN .. '; fp_path "$1"\' _ ' .. version .. ')"'
 end
 
-local FP = fp_bin_expr(fp_version) .. " php-cli"
 
 -- Plugin data directory: <MISE_DATA_DIR>/phpx (composer.phar, extensions, php shim).
 local function data_dir()
@@ -121,8 +120,26 @@ local function get_tool(ctx)
     return ""
 end
 
+-- Path of the argv-normalising bootstrap (see libexec/phpx-run.php), copied
+-- into the shared libexec so generated wrappers do not depend on the plugin dir.
+local function run_php()
+    return data_dir() .. "/libexec/phpx-run.php"
+end
+
+local function ensure_run_php(ctx)
+    local src = plugin_dir(ctx) .. "/libexec/phpx-run.php"
+    os.execute("mkdir -p " .. shell_quote(data_dir() .. "/libexec"))
+    os.execute("cp " .. shell_quote(src) .. " " .. shell_quote(run_php()))
+    return run_php()
+end
+
+-- FrankenPHP php-cli runner for scripts/PHARs (argv normalised by phpx-run.php).
+local FP = fp_bin_expr(fp_version) .. " php-cli " .. shell_quote(run_php())
+
 return {
     FP                   = FP,
+    run_php              = run_php,
+    ensure_run_php       = ensure_run_php,
     FP_FN                = FP_FN,
     fp_bin_expr          = fp_bin_expr,
     data_dir             = data_dir,
