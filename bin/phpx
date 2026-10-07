@@ -76,7 +76,7 @@ while [[ $i -lt ${#FIRST_ARGS[@]} ]]; do
     else
         ARGS+=("$arg")
     fi
-    ((i++))
+    i=$((i+1))
 done
 
 # Handle special commands

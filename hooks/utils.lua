@@ -10,12 +10,18 @@ if uname_f then
 end
 local FP = "mise x 'github:php/frankenphp@" .. fp_version .. "' -q --raw -- " .. fp_bin .. " php-cli"
 
+-- Plugin data directory: <MISE_DATA_DIR>/phpx (composer.phar, extensions, php shim).
+local function data_dir()
+    local base = os.getenv("MISE_DATA_DIR")
+    if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.local/share/mise" end
+    return base .. "/phpx"
+end
+
 -- Downloads composer.phar once into MISE_DATA_DIR/phpx/ and returns its path.
 -- Accepts the mise `cmd` module so it can be called from any hook.
 local function ensure_composer_phar(cmd)
-    local data_dir = os.getenv("MISE_DATA_DIR") or (os.getenv("HOME") .. "/.local/share/mise")
-    local phar = data_dir .. "/phpx/composer.phar"
-    os.execute("mkdir -p " .. data_dir .. "/phpx")
+    local phar = data_dir() .. "/composer.phar"
+    os.execute("mkdir -p " .. data_dir())
     local f = io.open(phar, "r")
     if f then
         f:close()
@@ -44,6 +50,23 @@ local function detect_backend(ctx)
         end
     end
     return "phpx"
+end
+
+-- Directory of this plugin (…/plugins/phpx). MISE_PLUGIN_DIR is not set in
+-- every hook (and the `debug` library is unavailable in mise's Lua sandbox),
+-- so fall back to <MISE_DATA_DIR>/plugins/<name>, derived from ctx.install_path.
+local function plugin_dir(ctx)
+    local env = os.getenv("MISE_PLUGIN_DIR") or os.getenv("MISE_PLUGIN_PATH")
+    if env and env ~= "" then return env end
+    local name = (PLUGIN and PLUGIN.name) or "phpx"
+    local data_dir = os.getenv("MISE_DATA_DIR")
+    if (not data_dir or data_dir == "") and ctx and ctx.install_path then
+        data_dir = ctx.install_path:match("^(.*)/installs/")
+    end
+    if not data_dir or data_dir == "" then
+        data_dir = (os.getenv("HOME") or "") .. "/.local/share/mise"
+    end
+    return data_dir .. "/plugins/" .. name
 end
 
 -- Single-quotes a value for safe interpolation into a shell command.
@@ -80,9 +103,11 @@ end
 
 return {
     FP                   = FP,
+    data_dir             = data_dir,
     ensure_composer_phar = ensure_composer_phar,
     detect_backend       = detect_backend,
     get_tool             = get_tool,
     shell_quote          = shell_quote,
+    plugin_dir           = plugin_dir,
     opt_list             = opt_list,
 }

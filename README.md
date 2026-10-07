@@ -150,7 +150,7 @@ Each `phpx:composer:*` tool is installed in its own isolated Composer project. U
 | --------------- | ----------- |
 | `extra`         | Additional packages to `composer require` alongside the main one. TOML array or a single string separated by spaces/commas. Each entry is `vendor/package[:constraint]`; without a constraint Composer picks the best matching version. All packages are solved together, so conflicts surface at `mise install`. |
 | `allow_plugins` | Composer plugins to allow (`config.allow-plugins.<name> = true`). Use `"true"` to allow every plugin. Required for plugins such as `phpstan/extension-installer`, otherwise Composer refuses to run them in non-interactive mode. |
-| `config`        | Arbitrary Composer config entries as `key=value` (run through `composer config`), e.g. `"process-timeout=600 platform.php=8.3.0"`. |
+| `config`        | Arbitrary Composer config entries as `key=value` (run through `composer config`), e.g. `"process-timeout=600 platform.php=8.3.0"`. Use the TOML array form for values containing spaces or commas, such as JSON: `config = ['repositories.private={"type":"composer","url":"https://repo.example.com"}']`. |
 | `composer_json` | Path to a `composer.json` used as the base of the install project (relative paths resolve from the mise project root). Everything in it is honoured — `require-dev`, `config`, `repositories`, `scripts`… — and the main package is then added on top. |
 
 The same setup with a full manifest, for example the one you already keep in `tools/phpstan/composer.json`:
@@ -342,6 +342,17 @@ phpx --version    # shows active FrankenPHP + PHP
 cpx --version     # should report the same PHP
 ```
 
+## The `php` command and subprocesses
+
+Every tool runs under FrankenPHP, whose `php-cli` only accepts a script (or `-r code`) and its arguments, and which reports an empty `PHP_BINARY`. Tools that spawn PHP subprocesses or re-exec themselves — PHPStan's Turbo restarter via `pcntl_exec`, Symfony's `PhpExecutableFinder`, `#!/usr/bin/env php` launchers — would otherwise fall back to whatever `php` is on `PATH`, or fail when there is none.
+
+The plugin therefore generates a `php` shim in `~/.local/share/mise/phpx/libexec/`, backed by FrankenPHP, that emulates the usual `php` flags (`-c`, `-d`, `-n`, `-v`, `-m`, `--ini`) by translating them into a temporary `PHP_INI_SCAN_DIR`. Composer and PHAR wrappers put it first on `PATH` and export `PHP_BINARY`/`PHP_PATH` to it, and `phpx:phpx` exposes it as a regular `php` command:
+
+```bash
+php -v                                  # PHP 8.5.x (cli) (FrankenPHP)
+php -d memory_limit=1G script.php
+```
+
 ## FrankenPHP version coordination
 
 All three backends share the same FrankenPHP version at runtime. When `phpx:phpx` is active, mise injects `PHPX_FRANKENPHP_VERSION` into the environment. The `composer` and `phive` wrappers read this variable, so `cpx`, `phpstan`, `pie`, etc. always run on the same PHP version as `phpx`.
@@ -376,7 +387,8 @@ When mise installs a `phpx:*` tool it:
 4. For `composer`: downloads `composer.phar` once into `$MISE_DATA_DIR/phpx/` and uses it via FrankenPHP — no system Composer needed. Applies `composer_json`, `allow_plugins` and `config` options, then requires the package together with any `extra` packages.
 5. For `phive`: fetches the PHAR asset URL from the GitHub Releases API, falls back to the conventional download URL.
 6. Generates a `#!/usr/bin/env bash` wrapper in the tool's `bin/` that calls `github:php/frankenphp@${PHPX_FRANKENPHP_VERSION:-latest}` directly, so binaries are available without a PHP environment.
-7. Exposes wrappers via `PATH` through mise's `BackendExecEnv`.
+7. Generates the shared `php` shim (see [The `php` command and subprocesses](#the-php-command-and-subprocesses)) and points wrappers' `PATH`/`PHP_BINARY` to it.
+8. Exposes wrappers via `PATH` through mise's `BackendExecEnv`.
 
 ## Requirements
 
