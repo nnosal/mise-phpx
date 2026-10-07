@@ -191,6 +191,19 @@ case "${ARGS[0]:-}" in
                     fi
                 fi
 
+                # 2b. System phpize/php-config that is ZTS and matches FrankenPHP's PHP minor
+                #     (e.g. shivammathur/setup-php with phpts=zts, or a distro php-zts build)
+                if [[ -z "$_PHPIZE" ]] && command -v php-config &>/dev/null && command -v phpize &>/dev/null; then
+                    _sys_bin=$(php-config --php-binary 2>/dev/null)
+                    _sys_ver=$(php-config --version 2>/dev/null | cut -d. -f1,2)
+                    if [[ -x "$_sys_bin" && "$_sys_ver" == "$_FP_PHP_VER" \
+                          && "$("$_sys_bin" -n -r 'echo PHP_ZTS;' 2>/dev/null)" == "1" ]]; then
+                        _PHPIZE=$(command -v phpize)
+                        _PHPCONFIG=$(command -v php-config)
+                        echo "phpx: using system ZTS phpize (PHP ${_sys_ver})"
+                    fi
+                fi
+
                 # 3. Auto-provision: download bottle + extract (no brew install, no deps)
                 if [[ -z "$_PHPIZE" ]] && command -v brew &>/dev/null; then
                     echo "phpx: provisioning ZTS phpize for PHP ${_FP_PHP_VER} (one-time download)..." >&2

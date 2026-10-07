@@ -1,0 +1,240 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  MISE_YES: "1"
+  MISE_VERSION_CHECK: "0"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  # All three backends: phpx (FrankenPHP), composer packages, PHAR tools.
+  backends:
+    name: backends (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+
+      - name: Link plugin
+        run: |
+          mise plugin link phpx "$GITHUB_WORKSPACE"
+          mise plugins ls
+
+      - name: Create test project
+        run: |
+          mkdir -p "$RUNNER_TEMP/proj" && cd "$RUNNER_TEMP/proj"
+          cat > mise.toml <<'TOML'
+          [tools]
+          "phpx:phpx"           = "php8.5"
+          "phpx:composer:cpx"   = "latest"
+          "phpx:phive:pie"      = "latest"
+          "phpx:phive:composer" = "2.8.9"
+          TOML
+          cat mise.toml
+
+      - name: mise ls-remote
+        working-directory: ${{ runner.temp }}/proj
+        run: |
+          mise ls-remote phpx:phpx | tail -3
+          mise ls-remote phpx:composer:cpx | tail -3
+          mise ls-remote phpx:phive:pie | tail -3
+
+      - name: mise install
+        working-directory: ${{ runner.temp }}/proj
+        run: mise install && mise ls
+
+      - name: phpx (FrankenPHP)
+        working-directory: ${{ runner.temp }}/proj
+        run: |
+          set -x
+          mise x -- phpx --version
+          mise x -- phpx --version | grep -q "PHP 8.5"
+          [ "$(mise x -- phpx -r 'echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')" = "85" ]
+          printf '<?php echo "script-ok";\n' > t.php
+          [ "$(mise x -- phpx t.php)" = "script-ok" ]
+          mise x -- php -v | grep -q FrankenPHP
+          [ "$(mise x -- php -d memory_limit=1G -r 'echo ini_get("memory_limit");')" = "1G" ]
+          mise x -- phpx -x list
+
+      - name: composer backend (cpx)
+        working-directory: ${{ runner.temp }}/proj
+        run: |
+          set -x
+          mise x -- cpx --version
+          mise x -- cpx --version | grep -q "PHP 8.5"
+
+      - name: phive backend (pie, composer)
+        working-directory: ${{ runner.temp }}/proj
+        run: |
+          set -x
+          mise x -- pie --version
+          mise x -- composer --version
+          mise x -- composer --version | grep -q "2.8.9"
+
+  # Issue #2: extra packages + allow_plugins / composer_json for a composer tool.
+  composer-options:
+    name: composer options (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - name: Link plugin
+        run: mise plugin link phpx "$GITHUB_WORKSPACE"
+
+      - name: Project with `extra` + `allow_plugins`
+        run: |
+          mkdir -p "$RUNNER_TEMP/extra/src" && cd "$RUNNER_TEMP/extra"
+          cat > mise.toml <<'TOML'
+          [tools]
+          "phpx:phpx" = "php8.5"
+          "phpx:composer:phpstan" = { version = "latest",
+            extra = ["phpstan/extension-installer:^1.4", "phpstan/phpstan-strict-rules:^2.0", "phpstan/phpstan-deprecation-rules"],
+            allow_plugins = "phpstan/extension-installer",
+            config = "process-timeout=600" }
+          TOML
+          printf 'parameters:\n  level: 8\n  paths:\n    - src\n' > phpstan.neon
+          cat > src/Foo.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          function foo(array $a): bool
+          {
+              if ($a) { return true; }
+              return false;
+          }
+          PHP
+          mise install
+          D=$(mise where phpx:composer:phpstan)
+          cat "$D/composer.json"
+          grep -q '"phpstan/extension-installer": true' "$D/composer.json"
+          grep -q '"process-timeout": "600"\|"process-timeout": 600' "$D/composer.json"
+          grep -q "phpstan/phpstan-strict-rules" "$D/vendor/phpstan/extension-installer/src/GeneratedConfig.php"
+          mise x -- phpstan --version
+          # strict-rules must be active (if.condNotBoolean comes from phpstan-strict-rules)
+          out=$(mise x -- phpstan analyse --no-progress --error-format=raw || true)
+          echo "$out"
+          echo "$out" | grep -q "if.condNotBoolean"
+
+      - name: Project with `composer_json` (issue #2 manifest)
+        run: |
+          mkdir -p "$RUNNER_TEMP/manifest/tools/phpstan" && cd "$RUNNER_TEMP/manifest"
+          cat > tools/phpstan/composer.json <<'JSON'
+          {
+            "license": "MIT",
+            "require-dev": {
+              "phpstan/extension-installer": "^1.4",
+              "phpstan/phpstan": "^2.1",
+              "phpstan/phpstan-deprecation-rules": "^2.0",
+              "phpstan/phpstan-doctrine": "^2.0",
+              "phpstan/phpstan-phpunit": "^2.0",
+              "phpstan/phpstan-strict-rules": "^2.0",
+              "phpstan/phpstan-symfony": "^2.0",
+              "rector/type-perfect": "^2.1",
+              "symplify/phpstan-rules": "^14.6"
+            },
+            "config": {
+              "allow-plugins": {
+                "phpstan/extension-installer": true
+              }
+            }
+          }
+          JSON
+          cat > mise.toml <<'TOML'
+          [tools]
+          "phpx:phpx" = "php8.5"
+          "phpx:composer:phpstan" = { version = "latest", composer_json = "tools/phpstan/composer.json" }
+          TOML
+          mise install
+          D=$(mise where phpx:composer:phpstan)
+          ls "$D/vendor/phpstan" "$D/vendor/symplify" "$D/vendor/rector"
+          grep -c "'phpstan/" "$D/vendor/phpstan/extension-installer/src/GeneratedConfig.php"
+          mise x -- phpstan --version
+
+  # Issue #1: PIE extensions, declaratively and via `phpx -x install`.
+  # FrankenPHP is ZTS, so a matching ZTS phpize is provided by setup-php.
+  extensions:
+    name: extensions (${{ matrix.os }}, ${{ matrix.phpize }} phpize)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ZTS phpize provided by setup-php (CI / Linux style)
+          - os: ubuntu-latest
+            phpize: setup-php
+          - os: macos-latest
+            phpize: setup-php
+          # No PHP at all: phpx auto-provisions a ZTS phpize from Homebrew bottles
+          - os: macos-latest
+            phpize: auto-provisioned
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install: false
+          cache: false
+      - uses: shivammathur/setup-php@v2
+        if: matrix.phpize == 'setup-php'
+        with:
+          php-version: "8.5"
+          tools: none
+        env:
+          phpts: zts
+      - name: Check system phpize is ZTS
+        if: matrix.phpize == 'setup-php'
+        run: |
+          php -r 'echo "system php ", PHP_VERSION, " ZTS=", PHP_ZTS, PHP_EOL;'
+          php-config --version
+          [ "$(php -n -r 'echo PHP_ZTS;')" = "1" ]
+      - name: Remove any preinstalled PHP
+        if: matrix.phpize == 'auto-provisioned'
+        run: |
+          brew uninstall --ignore-dependencies --force php php@8.4 php@8.3 2>/dev/null || true
+          if command -v php; then echo "php still on PATH"; exit 1; fi
+          if command -v phpize; then echo "phpize still on PATH"; exit 1; fi
+          echo "no system php/phpize — good"
+      - name: Link plugin
+        run: mise plugin link phpx "$GITHUB_WORKSPACE"
+
+      - name: Declarative `extensions` option (pie auto-provisioned)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ext" && cd "$RUNNER_TEMP/ext"
+          cat > mise.toml <<'TOML'
+          [tools]
+          "phpx:phpx" = { version = "php8.5", extensions = ["asgrim/example-pie-extension"] }
+          TOML
+          mise install
+          mise x -- phpx -x list
+          mise x -- phpx -x list | grep "example_pie_extension" | grep -q " loaded"
+          [ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]
+          # the shim-backed `php` and composer/phive wrappers see the extension too
+          [ "$(mise x -- php -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]
+
+      - name: "`phpx -x uninstall`"
+        working-directory: ${{ runner.temp }}/ext
+        run: |
+          mise x -- phpx -x uninstall asgrim/example-pie-extension
+          [ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "no" ]
+
+      - name: "`phpx -x install` on the command line"
+        working-directory: ${{ runner.temp }}/ext
+        run: |
+          mise x -- phpx -x install asgrim/example-pie-extension
+          [ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]
