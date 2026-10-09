@@ -272,7 +272,8 @@ function PLUGIN:BackendInstall(ctx)
         -- Create FrankenPHP wrappers for each vendor/bin script
         local bin_dir = ctx.install_path .. "/bin"
         os.execute("mkdir -p " .. bin_dir)
-        local bins = cmd.exec("ls " .. ctx.install_path .. "/vendor/bin/ 2>/dev/null") or ""
+        -- 20261009: `ls` may be lsd/eza (colored output) and polluted binary names; Fix: shell glob
+        local bins = cmd.exec("cd " .. q(ctx.install_path .. "/vendor/bin") .. " 2>/dev/null && for f in *; do [ -e \"$f\" ] && echo \"$f\"; done; true") or ""
         for binary in bins:gmatch("[^\n]+") do
             if binary ~= "" then
                 local src  = ctx.install_path .. "/vendor/bin/" .. binary

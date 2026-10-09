@@ -33,7 +33,7 @@ EOF
 mise install
 
 # 4. Use it
-phpx --version          # PHP 8.5.x (FrankenPHP 1.11.3)
+phpx --version          # PHP 8.5.x (FrankenPHP 1.13.0)
 phpx -r 'echo 42;'      # Run PHP code
 cpx laravel/laravel .   # Scaffold a Laravel project
 ```
@@ -70,14 +70,16 @@ mise install
 | -------- | ---------- | ----------- |
 | `php8.3` | `1.2.5`    | PHP 8.3.x   |
 | `php8.4` | `1.11.2`   | PHP 8.4.x   |
-| `php8.5` | `1.11.3`   | PHP 8.5.x   |
+| `php8.5` | `1.13.0`   | PHP 8.5.x   |
 | `latest` | `latest`   | PHP 8.5.x+   |
+
+> **Note:** `php8.5` needs FrankenPHP ≥ 1.13: earlier releases leave `PHP_BINARY` empty, which breaks tools that re-exec PHP (PHPStan Turbo).
 
 > **Note:** no stable FrankenPHP release ships PHP 8.2 — `1.0.0` already bundles PHP 8.3.0.
 
 Exact versions are also accepted: `"phpx:phpx" = "1.4.4"`.
 
-To list all available versions and aliases:
+To list all available FrankenPHP versions (aliases are not listed, they resolve at install):
 
 ```bash
 mise ls-remote phpx:phpx
@@ -160,7 +162,7 @@ The same setup with a full manifest, for example the one you already keep in `to
 "phpx:composer:phpstan" = { version = "2.1.0", composer_json = "tools/phpstan/composer.json" }
 ```
 
-> **Tip:** `mise install` is only re-run when the version changes. After editing `extra`, `config` or the referenced `composer.json`, reinstall with `mise install -f phpx:composer:phpstan`.
+> **Tip:** `mise install` is only re-run when the version changes. After editing tool options (`extra`, `config`, `composer_json`, `extensions`, `rename_exe`...) or the referenced `composer.json`, reinstall with `mise install -f <tool>`, e.g. `mise install -f phpx:composer:phpstan`.
 
 ### phive — PHAR tools
 
@@ -320,7 +322,7 @@ phpstan analyse src/   # strict + doctrine rules auto-registered
 
 In your project's `mise.toml`, pin to a specific FrankenPHP version for reproducibility:
 ```toml
-"phpx:phpx" = "1.11.3"
+"phpx:phpx" = "1.13.0"
 ```
 
 In your global `~/.config/mise/config.toml`, use an alias for convenience:
@@ -359,10 +361,10 @@ All three backends share the same FrankenPHP version at runtime. When `phpx:phpx
 
 ```
 phpx:phpx = "php8.5"
-    └─ BackendExecEnv injects PHPX_FRANKENPHP_VERSION=1.11.3
-           ├─ phpx  → github:php/frankenphp@1.11.3
-           ├─ cpx   → github:php/frankenphp@1.11.3
-           └─ pie   → github:php/frankenphp@1.11.3
+    └─ BackendExecEnv injects PHPX_FRANKENPHP_VERSION=1.13.0
+           ├─ phpx  → github:php/frankenphp@1.13.0
+           ├─ cpx   → github:php/frankenphp@1.13.0
+           └─ pie   → github:php/frankenphp@1.13.0
 ```
 
 If `phpx:phpx` is not declared, wrappers fall back to `latest`.
@@ -382,7 +384,7 @@ export GITHUB_TOKEN=ghp_...   # or GH_TOKEN
 When mise installs a `phpx:*` tool it:
 
 1. Detects the backend from the tool name prefix (`phpx`, `composer`, or `phive`).
-2. Resolves version aliases (`php8.5` → `1.11.3`) before any FrankenPHP interaction.
+2. Resolves version aliases (`php8.5` → `1.13.0`) before any FrankenPHP interaction.
 3. Downloads FrankenPHP via `github:php/frankenphp@<version>` — supports all versions back to `1.0.0` — and installs any PIE `extensions` declared on `phpx:phpx`.
 4. For `composer`: downloads `composer.phar` once into `$MISE_DATA_DIR/phpx/` and uses it via FrankenPHP — no system Composer needed. Applies `composer_json`, `allow_plugins` and `config` options, then requires the package together with any `extra` packages.
 5. For `phive`: fetches the PHAR asset URL from the GitHub Releases API, falls back to the conventional download URL.

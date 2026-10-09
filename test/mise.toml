@@ -1,0 +1,5 @@
+[tools]
+"phpx:phpx"           = "php8.5"
+"phpx:composer:cpx"   = "latest"
+"phpx:phive:pie"      = "latest"
+"phpx:phive:composer" = "2.8.9"

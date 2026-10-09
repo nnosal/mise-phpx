@@ -1,0 +1,167 @@
+# Test harness du plugin. Tout vit dans .mise-data (isolé de ~/.local/share/mise).
+# Usage: mise run test   |   mise run clean
+# `mise run` installerait sinon les outils globaux de ~/.config/mise avant la tâche
+[settings]
+task.run_auto_install = false
+
+[env]
+MISE_DATA_DIR = "{{config_root}}/.mise-data"
+# Ignore ~/.config/mise et les mise.toml parents (sinon leurs outils sont aussi installés ici)
+MISE_CEILING_PATHS = "{{config_root}}/.."
+MISE_CONFIG_DIR = "{{config_root}}/.mise-data/config"
+MISE_YES = "1"
+MISE_VERSION_CHECK = "0"
+MISE_TRUSTED_CONFIG_PATHS = "{{config_root}}"
+
+[tasks.link]
+description = "Lie ce dossier comme plugin phpx (data dir isolé)"
+run = "mise plugin link -f phpx \"{{config_root}}\" && mise plugins ls"
+
+[tasks.install]
+description = "Installe les outils de test/mise.toml"
+depends = ["link"]
+dir = "{{config_root}}/test"
+# Évite le rate limit GitHub (60 req/h) si gh est connecté
+run = '''
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}"
+mise ls-remote phpx:phpx | tail -3
+mise install
+mise ls
+'''
+
+[tasks.test]
+description = "Smoke test des 3 backends (phpx, composer, phive)"
+depends = ["install"]
+dir = "{{config_root}}/test"
+run = '''
+set -euo pipefail
+ok() { echo "OK  $*"; }
+mise x -- phpx --version | grep -q "PHP 8.5";                       ok "phpx --version"
+[ "$(mise x -- phpx -r 'echo PHP_MAJOR_VERSION.PHP_MINOR_VERSION;')" = "85" ]; ok "phpx -r"
+printf '<?php echo "script-ok";\n' > .t.php
+[ "$(mise x -- phpx .t.php)" = "script-ok" ]; rm -f .t.php;         ok "phpx script (argv FrankenPHP 1.13)"
+printf '<?php echo $argv[1], "|", count($argv);\n' > .t.php
+[ "$(mise x -- phpx frankenphp@1.13.0 .t.php hi)" = "hi|2" ]; rm -f .t.php; ok "FrankenPHP 1.13 argv"
+[ "$(mise x -- phpx frankenphp@1.13.0 -r 'echo basename(PHP_BINARY);')" = "php" ]; ok "FrankenPHP 1.13 PHP_BINARY = shim"
+mise x -- php -v | grep -q FrankenPHP;                              ok "php shim -v"
+[ "$(mise x -- php -d memory_limit=1G -r 'echo ini_get("memory_limit");')" = "1G" ]; ok "php shim -d"
+mise x -- phpx -x list >/dev/null;                                  ok "phpx -x list"
+mise x -- cpx --version | grep -q "cpx v";                          ok "composer backend (cpx)"
+mise x -- composer --version | grep -q "2.8.9";                     ok "phive composer 2.8.9"
+mise x -- pie --version >/dev/null;                                 ok "phive pie"
+echo "ALL GOOD"
+'''
+
+[tasks.test-composer]
+description = "Options composer: extra, allow_plugins, config, composer_json (phpstan)"
+depends = ["link"]
+run = """
+set -euo pipefail
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}"
+P="{{config_root}}/.mise-data/proj/composer"; rm -rf "$P"; mkdir -p "$P/src" "$P/m/tools/phpstan"
+cd "$P"
+cat > mise.toml <<'TOML'
+[tools]
+"phpx:phpx" = "php8.5"  # alias -> 1.13.x (PHPStan Turbo exige PHP_BINARY)
+"phpx:composer:phpstan" = { version = "latest", extra = ["phpstan/extension-installer:^1.4", "phpstan/phpstan-strict-rules:^2.0"], allow_plugins = "phpstan/extension-installer", config = "process-timeout=600" }
+TOML
+printf 'parameters:\\n  level: 8\\n  paths:\\n    - src\\n' > phpstan.neon
+printf '<?php\\ndeclare(strict_types=1);\\nfunction foo(array $a): bool\\n{\\n    if ($a) { return true; }\\n    return false;\\n}\\n' > src/Foo.php
+mise install
+D=$(mise where phpx:composer:phpstan)
+grep -q '"phpstan/extension-installer": true' "$D/composer.json"
+grep -q '"process-timeout": "\\?600' "$D/composer.json"
+grep -q "phpstan/phpstan-strict-rules" "$D/vendor/phpstan/extension-installer/src/GeneratedConfig.php"
+mise x -- phpstan --version
+out=$(mise x -- phpstan analyse --no-progress --error-format=raw || true); echo "$out"
+echo "$out" | grep -q "if.condNotBoolean"
+echo "OK  extra + allow_plugins + config + strict rules actives"
+
+cd "$P/m"
+cat > tools/phpstan/composer.json <<'JSON'
+{"require-dev":{"phpstan/extension-installer":"^1.4","phpstan/phpstan":"^2.1","phpstan/phpstan-strict-rules":"^2.0"},"config":{"allow-plugins":{"phpstan/extension-installer":true}}}
+JSON
+cat > mise.toml <<'TOML'
+[tools]
+"phpx:phpx" = "php8.5"  # alias -> 1.13.x (PHPStan Turbo exige PHP_BINARY)
+"phpx:composer:phpstan" = { version = "latest", composer_json = "tools/phpstan/composer.json" }
+TOML
+mise install
+D=$(mise where phpx:composer:phpstan)
+ls "$D/vendor/phpstan" | grep -q phpstan-strict-rules
+mise x -- phpstan --version
+echo "OK  composer_json"
+"""
+
+[tasks.test-phive]
+description = "Options phive: asset_pattern, version_prefix, rename_exe, alias wp-blueprint, delegation phpx composer:/phive:"
+depends = ["link"]
+run = """
+set -euo pipefail
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}"
+P="{{config_root}}/.mise-data/proj/phive"; rm -rf "$P"; mkdir -p "$P"; cd "$P"
+cat > mise.toml <<'TOML'
+[tools]
+"phpx:phpx" = "php8.5"
+"phpx:phive:phive" = "0.15.2"
+"phpx:phive:wp-blueprint" = "latest"
+"phpx:phive:composer" = { version = "2.8.8", version_prefix = "", rename_exe = "comp" }
+TOML
+mise install
+mise x -- phive --version | grep -qi phive;               echo "OK  phive alias"
+mise x -- comp --version | grep -q 2.8.8;                 echo "OK  rename_exe + version_prefix"
+mise x -- wp-blueprint --help >/dev/null 2>&1 || mise x -- wp-blueprint >/dev/null 2>&1 || true
+test -x "$(mise where phpx:phive:wp-blueprint)/wp-blueprint"; echo "OK  alias wp-blueprint + asset_pattern"
+mise x -- phpx phive:pie@latest -- --version >/dev/null;  echo "OK  phpx phive:pie@ delegation"
+mise x -- phpx composer:cpx -- --version | grep -q "cpx v"; echo "OK  phpx composer:cpx delegation"
+mise x -- phpx composer --version | grep -q "Composer version"; echo "OK  phpx composer"
+mise ls-remote phpx:phive:pie | tail -2;                  echo "OK  ls-remote phive"
+[ -n "$(mise ls-remote phpx:phpx | tail -1)" ];            echo "OK  ls-remote phpx"
+"""
+
+[tasks.test-server]
+description = "phpx -S (serveur intégré)"
+depends = ["install"]
+dir = "{{config_root}}/test"
+run = """
+D=$(mktemp -d); echo '<?php echo "srv-ok";' > "$D/index.php"
+mise x -- phpx -S 127.0.0.1:8765 -r "$D" >/tmp/phpx-srv.log 2>&1 &
+for i in $(seq 1 30); do curl -fs http://127.0.0.1:8765/ >/dev/null 2>&1 && break; sleep 1; done
+out=$(curl -fs http://127.0.0.1:8765/ || true)
+# phpx -S fait `exec frankenphp`: tuer `mise x` laisserait l'orphelin
+pkill -f "[p]hp-server --listen 127.0.0.1:8765" || true
+if [ "$out" = "srv-ok" ]; then echo "OK  phpx -S"; else cat /tmp/phpx-srv.log; exit 1; fi
+"""
+
+[tasks.test-ext]
+description = "Extensions PIE: declaratif, list, uninstall, install CLI (compile, brew requis)"
+depends = ["link"]
+run = """
+set -euo pipefail
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token 2>/dev/null)}"
+P="{{config_root}}/.mise-data/proj/ext"; rm -rf "$P"; mkdir -p "$P"; cd "$P"
+cat > mise.toml <<'TOML'
+[tools]
+"phpx:phpx" = { version = "php8.5", extensions = ["asgrim/example-pie-extension"] }
+TOML
+mise install -f phpx:phpx  # options hors clé d'install: sans -f mise saute un php8.5 déjà installé
+mise x -- phpx -x list | grep example_pie_extension | grep -q " loaded"; echo "OK  declaratif + list"
+[ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]; echo "OK  phpx voit l'extension"
+[ "$(mise x -- php -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]; echo "OK  shim php voit l'extension"
+mise x -- phpx -x uninstall asgrim/example-pie-extension
+[ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "no" ]; echo "OK  uninstall"
+mise x -- phpx -x install asgrim/example-pie-extension
+[ "$(mise x -- phpx -r 'echo extension_loaded("example_pie_extension") ? "yes" : "no";')" = "yes" ]; echo "OK  install CLI"
+"""
+
+[tasks.test-all]
+description = "Tout: smoke + composer + phive + server + extensions"
+# Séquentiel: les suites partagent le même data dir (installs FrankenPHP concurrents sinon)
+run = """
+for t in test test-composer test-phive test-server test-ext; do mise run "$t" || { echo "SUITE FAILED: $t"; exit 1; }; done
+echo ALL SUITES GOOD
+"""
+
+[tasks.clean]
+description = "Supprime le data dir isolé"
+run = "rm -rf \"{{config_root}}/.mise-data\" \"{{config_root}}/test/.t.php\""
